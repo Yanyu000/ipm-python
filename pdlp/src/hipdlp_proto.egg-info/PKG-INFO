@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: hipdlp-proto
+Version: 0.0.0
+Requires-Python: >=3.9
+Requires-Dist: highspy
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: pytest
+Requires-Dist: rich
+Provides-Extra: gpu
+Requires-Dist: cupy-cuda12x; extra == "gpu"

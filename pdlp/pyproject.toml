@@ -1,0 +1,29 @@
+[project]
+name = "hipdlp-proto"
+version = "0.0.0"
+requires-python = ">=3.9"
+dependencies = [
+  "highspy",
+  "numpy",
+  "scipy",
+  "pytest",
+  "rich",
+]
+
+[project.optional-dependencies]
+gpu = [
+  "cupy-cuda12x",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

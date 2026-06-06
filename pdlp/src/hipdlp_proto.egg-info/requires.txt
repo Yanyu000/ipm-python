@@ -1,0 +1,8 @@
+highspy
+numpy
+scipy
+pytest
+rich
+
+[gpu]
+cupy-cuda12x
