@@ -1,0 +1,201 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{Wright1997,Nesterov1994}
+\citation{Mehrotra1992}
+\providecommand \oddpage@label [2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
+\newlabel{eq:normal}{{1}{1}{Introduction}{equation.1.1}{}}
+\citation{NVIDIA2023}
+\citation{Bellavia1998,Monteiro2003}
+\@writefile{toc}{\contentsline {paragraph}{Hardware trend: the GPU precision gap.}{2}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Algorithmic trend: inexact IPM theory.}{2}{section*.2}\protected@file@percent }
+\newlabel{eq:eta-def-intro}{{2}{2}{Algorithmic trend: inexact IPM theory}{equation.1.2}{}}
+\citation{Kerenidis2020}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Preliminaries}{4}{section.2}\protected@file@percent }
+\newlabel{sec:prelim}{{2}{4}{Preliminaries}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Standard-form linear programming}{4}{subsection.2.1}\protected@file@percent }
+\newlabel{eq:primal}{{3}{4}{Standard-form linear programming}{equation.2.3}{}}
+\newlabel{eq:dual}{{4}{4}{Standard-form linear programming}{equation.2.4}{}}
+\newlabel{eq:kkt}{{5}{4}{Standard-form linear programming}{equation.2.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}The central path and the duality measure}{4}{subsection.2.2}\protected@file@percent }
+\newlabel{eq:perturbed-compl}{{6}{4}{The central path and the duality measure}{equation.2.6}{}}
+\newlabel{eq:perturbed-kkt}{{7}{4}{The central path and the duality measure}{equation.2.7}{}}
+\newlabel{eq:duality-gap}{{9}{4}{The central path and the duality measure}{equation.2.9}{}}
+\citation{Mehrotra1992}
+\newlabel{eq:mu-def}{{10}{5}{The central path and the duality measure}{equation.2.10}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Newton system and the normal equations}{5}{subsection.2.3}\protected@file@percent }
+\newlabel{eq:linearized-compl}{{11}{5}{Newton system and the normal equations}{equation.2.11}{}}
+\newlabel{eq:augmented-system}{{12}{5}{Newton system and the normal equations}{equation.2.12}{}}
+\newlabel{eq:normal-detailed}{{13}{5}{Newton system and the normal equations}{equation.2.13}{}}
+\newlabel{eq:scaling}{{14}{5}{Newton system and the normal equations}{equation.2.14}{}}
+\newlabel{eq:recover-dx}{{15}{5}{Newton system and the normal equations}{equation.2.15}{}}
+\newlabel{eq:recover-ds}{{16}{5}{Newton system and the normal equations}{equation.2.16}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}The Mehrotra predictor-corrector algorithm}{6}{subsection.2.4}\protected@file@percent }
+\newlabel{sec:mehrotra}{{2.4}{6}{The Mehrotra predictor-corrector algorithm}{subsection.2.4}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.4.1}Step 1: Predictor (affine-scaling) direction}{6}{subsubsection.2.4.1}\protected@file@percent }
+\newlabel{eq:rd}{{17}{6}{Step 1: Predictor (affine-scaling) direction}{equation.2.17}{}}
+\newlabel{eq:r-aff}{{18}{6}{Step 1: Predictor (affine-scaling) direction}{equation.2.18}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.4.2}Step 2: Fraction-to-boundary step lengths}{6}{subsubsection.2.4.2}\protected@file@percent }
+\newlabel{eq:alpha-max}{{19}{6}{Step 2: Fraction-to-boundary step lengths}{equation.2.19}{}}
+\newlabel{eq:step-length}{{20}{6}{Step 2: Fraction-to-boundary step lengths}{equation.2.20}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.4.3}Step 3: Centering parameter}{6}{subsubsection.2.4.3}\protected@file@percent }
+\newlabel{eq:mu-aff}{{21}{6}{Step 3: Centering parameter}{equation.2.21}{}}
+\newlabel{eq:sigma}{{22}{6}{Step 3: Centering parameter}{equation.2.22}{}}
+\citation{Wright1997}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.4.4}Step 4: Corrector (combined) direction}{7}{subsubsection.2.4.4}\protected@file@percent }
+\newlabel{eq:corr1}{{23}{7}{Step 4: Corrector (combined) direction}{equation.2.23}{}}
+\newlabel{eq:corr2}{{24}{7}{Step 4: Corrector (combined) direction}{equation.2.24}{}}
+\newlabel{eq:corr3}{{25}{7}{Step 4: Corrector (combined) direction}{equation.2.25}{}}
+\newlabel{eq:corr-rhs}{{26}{7}{Step 4: Corrector (combined) direction}{equation.2.26}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.4.5}Step 5: Step length and update}{7}{subsubsection.2.4.5}\protected@file@percent }
+\newlabel{eq:step-lengths}{{27}{7}{Step 5: Step length and update}{equation.2.27}{}}
+\newlabel{eq:update}{{28}{7}{Step 5: Step length and update}{equation.2.28}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.4.6}Convergence monitoring}{7}{subsubsection.2.4.6}\protected@file@percent }
+\newlabel{eq:primal-res}{{29}{7}{Convergence monitoring}{equation.2.29}{}}
+\newlabel{eq:dual-res}{{30}{7}{Convergence monitoring}{equation.2.30}{}}
+\newlabel{eq:ipm-conv-test}{{31}{7}{Convergence monitoring}{equation.2.31}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Conditioning of the normal equations}{8}{subsection.2.5}\protected@file@percent }
+\newlabel{eq:cond-bound}{{32}{8}{Conditioning of the normal equations}{equation.2.32}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Inexact IPM Theory}{8}{section.3}\protected@file@percent }
+\newlabel{sec:theory}{{3}{8}{Inexact IPM Theory}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Inexact Newton directions}{8}{subsection.3.1}\protected@file@percent }
+\newlabel{eq:inexact-system}{{33}{8}{Inexact Newton directions}{equation.3.33}{}}
+\newlabel{eq:e-lin}{{34}{8}{Inexact Newton directions}{equation.3.34}{}}
+\newlabel{def:eta}{{3.1}{8}{Relative residual}{definition.3.1}{}}
+\newlabel{eq:eta-def}{{35}{8}{Relative residual}{equation.3.35}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Error propagation through the IPM step}{9}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:error-prop}{{3.2}{9}{Error propagation through the IPM step}{subsection.3.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.1}Error in the primal-dual directions}{9}{subsubsection.3.2.1}\protected@file@percent }
+\newlabel{eq:inexact-recover-dx}{{36}{9}{Error in the primal-dual directions}{equation.3.36}{}}
+\newlabel{eq:inexact-recover-ds}{{37}{9}{Error in the primal-dual directions}{equation.3.37}{}}
+\newlabel{eq:dx-error}{{38}{9}{Error in the primal-dual directions}{equation.3.38}{}}
+\newlabel{eq:ds-error}{{39}{9}{Error in the primal-dual directions}{equation.3.39}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.2}Propagation to primal feasibility}{9}{subsubsection.3.2.2}\protected@file@percent }
+\newlabel{eq:feas-prop}{{40}{9}{Propagation to primal feasibility}{equation.3.40}{}}
+\newlabel{eq:feas-prop-final}{{41}{9}{Propagation to primal feasibility}{equation.3.41}{}}
+\newlabel{eq:feas-loss}{{42}{9}{Propagation to primal feasibility}{equation.3.42}{}}
+\citation{Bellavia1998,Monteiro2003}
+\citation{Wright1997,Nesterov1994}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.3}Propagation to dual feasibility}{10}{subsubsection.3.2.3}\protected@file@percent }
+\newlabel{eq:dual-prop}{{43}{10}{Propagation to dual feasibility}{equation.3.43}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {3.2.4}Propagation to the duality measure}{10}{subsubsection.3.2.4}\protected@file@percent }
+\newlabel{eq:mu-prop}{{44}{10}{Propagation to the duality measure}{equation.3.44}{}}
+\newlabel{eq:mu-prop-expanded}{{45}{10}{Propagation to the duality measure}{equation.3.45}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Convergence theorem}{10}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:conv-theorem}{{3.3}{10}{Convergence theorem}{subsection.3.3}{}}
+\newlabel{as:feas}{{3.1}{10}{Interior starting point}{assumption.3.1}{}}
+\newlabel{eq:nbhd}{{46}{10}{Interior starting point}{equation.3.46}{}}
+\newlabel{as:rank}{{3.2}{10}{Full rank}{assumption.3.2}{}}
+\newlabel{th:conv}{{3.1}{10}{Polynomial convergence of inexact IPM}{theorem.3.1}{}}
+\newlabel{eq:eta-condition}{{47}{10}{Polynomial convergence of inexact IPM}{equation.3.47}{}}
+\newlabel{eq:mu-linear}{{48}{10}{Polynomial convergence of inexact IPM}{equation.3.48}{}}
+\newlabel{eq:iter-bound}{{49}{10}{Polynomial convergence of inexact IPM}{equation.3.49}{}}
+\citation{Bellavia1998}
+\citation{Monteiro2003}
+\citation{Kerenidis2020}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Feasible vs.\ infeasible inexact IPM}{11}{subsection.3.4}\protected@file@percent }
+\newlabel{sec:feas-vs-infeas}{{3.4}{11}{Feasible vs.\ infeasible inexact IPM}{subsection.3.4}{}}
+\citation{Kerenidis2020}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Multi-GPU Block Cholesky Preconditioner}{12}{section.4}\protected@file@percent }
+\newlabel{sec:precond}{{4}{12}{Multi-GPU Block Cholesky Preconditioner}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Block partition of the normal-equations matrix}{12}{subsection.4.1}\protected@file@percent }
+\newlabel{eq:block-partition}{{50}{12}{Block partition of the normal-equations matrix}{equation.4.50}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Block Cholesky factorization with Schur complement}{13}{subsection.4.2}\protected@file@percent }
+\newlabel{eq:2x2-block}{{51}{13}{Block Cholesky factorization with Schur complement}{equation.4.51}{}}
+\newlabel{eq:block-cholesky}{{52}{13}{Block Cholesky factorization with Schur complement}{equation.4.52}{}}
+\newlabel{eq:chol-M11}{{53}{13}{Block Cholesky factorization with Schur complement}{equation.4.53}{}}
+\newlabel{eq:schur}{{54}{13}{Block Cholesky factorization with Schur complement}{equation.4.54}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Block-diagonal preconditioner: trading exactness for parallelism}{13}{subsection.4.3}\protected@file@percent }
+\newlabel{eq:precond-def}{{55}{13}{Block-diagonal preconditioner: trading exactness for parallelism}{equation.4.55}{}}
+\newlabel{eq:local-cholesky}{{56}{13}{Block-diagonal preconditioner: trading exactness for parallelism}{equation.4.56}{}}
+\newlabel{eq:cond-preconditioned}{{57}{13}{Block-diagonal preconditioner: trading exactness for parallelism}{equation.4.57}{}}
+\citation{NVIDIA2023}
+\citation{Carson2018}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Precision strategy}{14}{subsection.4.4}\protected@file@percent }
+\newlabel{sec:precision-strategy}{{4.4}{14}{Precision strategy}{subsection.4.4}{}}
+\newlabel{eq:fp32-factor}{{58}{14}{Precision strategy}{equation.4.58}{}}
+\newlabel{eq:fp64-residual}{{59}{14}{Precision strategy}{equation.4.59}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}Solver 1: LowPrecisionCholeskySolver}{14}{subsection.4.5}\protected@file@percent }
+\newlabel{sec:lp-cholesky}{{4.5}{14}{Solver 1: LowPrecisionCholeskySolver}{subsection.4.5}{}}
+\@writefile{loa}{\contentsline {algocf}{\numberline {1}{\ignorespaces \texttt  {LowPrecisionCholeskySolver.solve(M, r)}}}{15}{algocf.1}\protected@file@percent }
+\newlabel{alg:lp-cholesky}{{1}{15}{Solver 1: LowPrecisionCholeskySolver}{algocf.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6}Solver 2: BlockJacobiPCGSolver}{15}{subsection.4.6}\protected@file@percent }
+\newlabel{sec:bj-pcg}{{4.6}{15}{Solver 2: BlockJacobiPCGSolver}{subsection.4.6}{}}
+\@writefile{loa}{\contentsline {algocf}{\numberline {2}{\ignorespaces \texttt  {BlockJacobiPCGSolver.solve(M, r)}}}{16}{algocf.2}\protected@file@percent }
+\newlabel{alg:bj-pcg}{{2}{16}{Conjugate gradient solve}{algocf.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.6.1}Preconditioner construction}{16}{subsubsection.4.6.1}\protected@file@percent }
+\newlabel{eq:block-solve}{{60}{16}{Preconditioner construction}{equation.4.60}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {4.6.2}Conjugate gradient solve}{16}{subsubsection.4.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Adaptive Refinement Strategy}{17}{section.5}\protected@file@percent }
+\newlabel{sec:adapt}{{5}{17}{Adaptive Refinement Strategy}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Motivation: why adaptivity matters}{17}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}The $\mu $-driven tolerance schedule}{17}{subsection.5.2}\protected@file@percent }
+\newlabel{sec:mu-schedule}{{5.2}{17}{The $\mu $-driven tolerance schedule}{subsection.5.2}{}}
+\newlabel{def:mu-schedule}{{5.1}{17}{$\mu $-driven tolerance schedule}{definition.5.1}{}}
+\newlabel{eq:mu-schedule}{{61}{17}{$\mu $-driven tolerance schedule}{equation.5.61}{}}
+\citation{Carson2018}
+\@writefile{toc}{\contentsline {paragraph}{Phase I: $\mu > 10^{-2}$ (early IPM).}{18}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Phase II: $10^{-6} < \mu \le 10^{-2}$ (mid IPM).}{18}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Phase III: $\mu \le 10^{-6}$ (late IPM).}{18}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Relationship to the convergence theory}{18}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}The AdaptiveRefinementSolver}{18}{subsection.5.4}\protected@file@percent }
+\newlabel{sec:adapt-algorithm}{{5.4}{18}{The AdaptiveRefinementSolver}{subsection.5.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Design analysis of the algorithm}{18}{subsection.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {5.5.1}Factorization reuse across multiple right-hand sides}{18}{subsubsection.5.5.1}\protected@file@percent }
+\citation{Kerenidis2020}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {5.5.2}Residual computed in FP64}{19}{subsubsection.5.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {5.5.3}The NaN guard and the eigendecomposition fallback}{19}{subsubsection.5.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {5.5.4}The fallback to FP64}{19}{subsubsection.5.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {5.5.5}Phase structure and the $\mu $-driven target}{19}{subsubsection.5.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6}Connection to quantum interior point methods}{19}{subsection.5.6}\protected@file@percent }
+\newlabel{sec:qipm-connection}{{5.6}{19}{Connection to quantum interior point methods}{subsection.5.6}{}}
+\citation{Kerenidis2020}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Numerical Experiments}{20}{section.6}\protected@file@percent }
+\newlabel{sec:experiments}{{6}{20}{Numerical Experiments}{section.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Experimental setup}{20}{subsection.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {6.1.1}Problem generation}{20}{subsubsection.6.1.1}\protected@file@percent }
+\newlabel{eq:problem-sizes}{{62}{20}{Problem generation}{equation.6.62}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {6.1.2}Solver configurations}{20}{subsubsection.6.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {6.1.3}IPM parameters}{21}{subsubsection.6.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Results}{21}{subsection.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}The gold standard: ExactCholesky}{21}{subsection.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Failure of fixed-precision FP32: LowPrecisionCholesky}{21}{subsection.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5}Stagnation of block-Jacobi preconditioning: BlockJacobiPCG(4)}{22}{subsection.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6}Recovery of convergence: AdaptiveRefinement}{22}{subsection.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7}Condition number growth and its connection to theory}{23}{subsection.6.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.8}Figures}{23}{subsection.6.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.9}Solution verification}{24}{subsection.6.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Conclusion}{24}{section.7}\protected@file@percent }
+\newlabel{sec:conclusion}{{7}{24}{Conclusion}{section.7}{}}
+\citation{Kerenidis2020}
+\bibstyle{plain}
+\bibdata{references}
+\bibcite{Bellavia1998}{1}
+\bibcite{Carson2018}{2}
+\bibcite{Kerenidis2020}{3}
+\bibcite{Mehrotra1992}{4}
+\bibcite{Monteiro2003}{5}
+\bibcite{Nesterov1994}{6}
+\bibcite{NVIDIA2023}{7}
+\bibcite{Wright1997}{8}
+\@writefile{loa}{\contentsline {algocf}{\numberline {3}{\ignorespaces \texttt  {AdaptiveRefinementSolver.solve(M, r, mu)}}}{27}{algocf.3}\protected@file@percent }
+\newlabel{alg:adapt}{{3}{27}{The AdaptiveRefinementSolver}{algocf.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Structural analogy between QIPM and the proposed multi-GPU mixed-precision IPM.}}{28}{table.1}\protected@file@percent }
+\newlabel{tab:qipm-analogy}{{1}{28}{Structural analogy between QIPM and the proposed multi-GPU mixed-precision IPM}{table.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Full numerical results across four problem sizes and four solver backends. ``Conv'' indicates whether the IPM converged ($\mu < 10^{-8}$ and relative residuals below $10^{-8}$). ``Final $\mu $'' is the duality measure at termination; ``NaN'' indicates divergence. ``Avg $\eta $'' is the geometric mean of the linear-solve relative residual across all IPM iterations. $\kappa _{\min }$ and $\kappa _{\max }$ are the minimum and maximum condition numbers of $\mathbf  {M}_k$ observed over the run.}}{28}{table.2}\protected@file@percent }
+\newlabel{tab:full-results}{{2}{28}{Full numerical results across four problem sizes and four solver backends. ``Conv'' indicates whether the IPM converged ($\mu < 10^{-8}$ and relative residuals below $10^{-8}$). ``Final $\mu $'' is the duality measure at termination; ``NaN'' indicates divergence. ``Avg $\eta $'' is the geometric mean of the linear-solve relative residual across all IPM iterations. $\kappa _{\min }$ and $\kappa _{\max }$ are the minimum and maximum condition numbers of $\bM _k$ observed over the run}{table.2}{}}
+\gdef \@abspage@last{28}

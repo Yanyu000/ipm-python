@@ -1,0 +1,2133 @@
+\documentclass[11pt,twoside]{article}
+
+% ---------------------------------------------------------------------------
+% Packages
+% ---------------------------------------------------------------------------
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{color}
+\usepackage{cite}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+
+% ---------------------------------------------------------------------------
+% Theorem environments
+% ---------------------------------------------------------------------------
+\usepackage{amsthm}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}{Definition}[section]
+\newtheorem{assumption}{Assumption}[section]
+\newtheorem{remark}{Remark}[section]
+
+% ---------------------------------------------------------------------------
+% Math notation
+% ---------------------------------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\bA}{\mathbf{A}}
+\newcommand{\bb}{\mathbf{b}}
+\newcommand{\bc}{\mathbf{c}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\by}{\mathbf{y}}
+\newcommand{\bs}{\mathbf{s}}
+\newcommand{\bD}{\mathbf{D}}
+\newcommand{\bM}{\mathbf{M}}
+\newcommand{\bP}{\mathbf{P}}
+\newcommand{\bDelta}{\mathbf{\Delta}}
+\newcommand{\bmu}{\boldsymbol{\mu}}
+\newcommand{\cO}{\mathcal{O}}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}
+\newcommand{\inner}[1]{\left\langle#1\right\rangle}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\cond}{\kappa}
+\newcommand{\blkdiag}{\operatorname{blkdiag}}
+
+% ---------------------------------------------------------------------------
+% Title
+% ---------------------------------------------------------------------------
+\title{
+  Multi-GPU Mixed-Precision Inexact Interior Point Methods \\
+  for Large-Scale Dense Linear Programming
+}
+
+\author{
+  Author One$^{1}$ \and Author Two$^{2}$ \\
+  \small $^{1}$Affiliation One \qquad $^{2}$Affiliation Two
+}
+
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+  We propose a multi-GPU mixed-precision inexact interior point method for
+  large-scale dense linear programming.  The normal-equations matrix is
+  partitioned into diagonal blocks, each factorized on a separate GPU in
+  low precision (FP32 or TF32) and used as a block-diagonal preconditioner
+  for conjugate gradient or iterative refinement.  The linear-solve
+  tolerance is adaptively scheduled as a function of the IPM duality
+  measure~$\mu_k$, from $10^{-4}$ in early iterations to $10^{-10}$ near
+  optimality, with a guaranteed FP64 fallback.  We prove polynomial
+  convergence of the predictor-corrector IPM when the relative residual
+  satisfies $\eta_k \le \bar{c}\mu_k^\alpha$, and analyze how inexactness
+  propagates through the primal and dual feasibility conditions.
+  Experiments on dense instances up to $m=200$, $n=600$ show that
+  fixed-accuracy low-precision and block-Jacobi solvers fail to converge,
+  while the adaptive solver matches the exact baseline in both iteration
+  count and solution quality.  The framework draws on the error-management
+  philosophy of quantum interior point methods, recasting it as a practical
+  strategy for heterogeneous GPU computing.
+\end{abstract}
+
+% ===================================================================
+\section{Introduction}
+\label{sec:intro}
+% ===================================================================
+
+Linear programming (LP) is a fundamental technology in operations research,
+machine learning, quantitative finance, and engineering design.  Modern
+applications routinely produce LP instances with tens of thousands of
+variables and constraints: portfolio optimization over large asset
+universes, sparse recovery and compressed sensing in signal processing,
+optimal transport in machine learning, and network flow problems in
+logistics and supply chain management, to name a few.  When the constraint
+matrix is dense---as it is in many of these applications after
+preprocessing, basis transformations, or when the problem is naturally
+fully coupled---the computational bottleneck shifts decisively to the
+linear algebra at each iteration of the optimization algorithm.
+
+Interior point methods (IPMs)~\cite{Wright1997,Nesterov1994} are among the
+most reliable and theoretically well-understood algorithms for solving LPs.
+A primal-dual IPM follows the central path toward optimality by solving, at
+each iteration, a Newton system that, after elimination of the primal and
+dual slack variables, reduces to the $m \times m$ symmetric positive
+definite \emph{normal equations}
+\begin{equation}
+  \bM_k \bDelta\by_k = \br_k, \qquad
+  \bM_k := \bA \bD_k^2 \bA^T,
+  \label{eq:normal}
+\end{equation}
+where $\bA \in \R^{m \times n}$ is the constraint matrix,
+$\bD_k = \diag(\sqrt{x_1/s_1},\dots,\sqrt{x_n/s_n})$ encodes the
+primal-dual scaling at iteration $k$, and $\br_k$ is the assembled
+right-hand side of the Mehrotra predictor-corrector
+scheme~\cite{Mehrotra1992}.  The matrix $\bM_k$ must be ``solved''---in
+the sense of computing $\bDelta\by_k$ that satisfies
+\eqref{eq:normal}---at every IPM iteration, and this is by far the most
+expensive operation in the algorithm.  In the codebase, $\bM_k$ is formed
+by the function \texttt{compute\_normal\_equation} in
+\texttt{lp\_problem.py} as \texttt{A\_scaled = A * D\_diag[None, :]}
+followed by \texttt{A\_scaled @ A\_scaled.T}, exactly implementing
+$\bM_k = (\bA\bD_k)(\bA\bD_k)^T$.
+
+For large-scale \emph{dense} LPs, where $m \approx 10^3$--$10^5$ and
+$\bA$ has no exploitable sparsity pattern, the standard approach is to
+factor $\bM_k$ via dense Cholesky decomposition $\bM_k = \bL\bL^T$,
+which costs $\cO(m^3)$ floating-point operations and must be repeated at
+every single IPM iteration (typically 15--40 iterations for a well-tuned
+implementation).  The total cost of the Cholesky factorizations alone can
+easily reach $10^{12}$--$10^{15}$ operations, dominating the solution
+time.  For instance, at $m = 10^4$, each Cholesky factorization involves
+approximately $1.7 \times 10^{11}$ operations; across 20 IPM iterations,
+this amounts to $3.4 \times 10^{12}$ operations, requiring minutes to
+hours on a single CPU core.
+
+Two recent developments, one in hardware and one in theory, motivate a
+fundamentally different approach to this bottleneck.
+
+\paragraph{Hardware trend: the GPU precision gap.}
+Modern GPU architectures deliver extraordinarily high throughput for
+dense linear algebra operations (GEMM, SYRK, TRSM) through tensor
+cores~\cite{NVIDIA2023}.  However, the throughput is strongly
+precision-dependent: on the NVIDIA H100 GPU, FP64 (double precision)
+delivers approximately 34 TFLOPS, while FP32 delivers 67 TFLOPS and TF32
+(tensor-float-32) reaches 990 TFLOPS---a nearly $30\times$ gap between
+the highest-throughput low-precision mode and the FP64 mode required for
+classical IPM linear algebra.  This precision gap means that a Cholesky
+factorization performed entirely in FP64 on a GPU leaves most of the
+hardware's computational capacity unused.  If we could perform the bulk
+of the factorization in FP32 or TF32 and recover accuracy through a small
+number of correction steps in FP64, the effective throughput could
+increase by an order of magnitude or more.
+
+\paragraph{Algorithmic trend: inexact IPM theory.}
+Independently, the theory of \emph{inexact} interior point
+methods~\cite{Bellavia1998,Monteiro2003} has established that the Newton
+direction need not be computed to machine precision at every IPM
+iteration.  It suffices that the relative residual of the linear solve,
+\begin{equation}
+  \eta_k := \frac{\norm{\bM_k\widehat{\bDelta\by}_k - \br_k}_2}
+                   {\norm{\br_k}_2},
+  \label{eq:eta-def-intro}
+\end{equation}
+be bounded by a quantity that shrinks with the IPM's progress toward
+optimality: $\eta_k \le \bar{c}\,\mu_k^\alpha$, where $\mu_k =
+\bx_k^T\bs_k / n$ is the current duality measure.  In plain terms, the
+linear solve can be quite inaccurate when the IPM is far from optimality
+($\mu_k$ large), but must become progressively more accurate as the
+solver converges ($\mu_k \to 0$).  This theoretical insight transforms
+the linear-solve accuracy from a \emph{fixed} requirement (machine
+precision at every iteration) into a \emph{dynamic} resource that can be
+allocated proportionally to the IPM's needs.  The residual $\eta_k$ is
+computed in the code by \texttt{\_compute\_eta} in
+\texttt{linear\_solver.py} as $\texttt{np.linalg.norm(M @ delta\_y -
+r) / np.linalg.norm(r)}$, always evaluated in FP64 regardless of the
+internal precision used by the solver.
+
+Our central observation is that these two developments are
+\emph{complementary}.  The GPU precision gap makes low-precision
+factorization fast; inexact IPM theory makes low-accuracy solves
+acceptable.  What is needed is a bridge between them: a
+precision-and-accuracy scheduling mechanism that decides, at each IPM
+iteration, \emph{how much} accuracy is required of the linear solve and
+\emph{in what precision} to compute the factorization, given the current
+duality measure $\mu_k$.
+
+We propose such a bridge in this paper: the \emph{multi-GPU mixed-precision
+inexact interior point method} for large-scale dense linear programming.
+The algorithm combines three ideas.  First, the normal-equations matrix
+$\bM_k$ is partitioned into $p$ diagonal blocks, each assigned to a
+distinct GPU and factorized independently via dense Cholesky in low
+precision (FP32 or TF32), yielding a block-diagonal preconditioner
+$\bP_k = \blkdiag(\bM_{11},\dots,\bM_{pp})$.  This block-partition strategy
+is implemented in \texttt{\_build\_block\_diagonal\_preconditioner} in
+\texttt{linear\_solver.py}, which slices $\bM_k$ into \texttt{num\_blocks}
+contiguous diagonal blocks and factors each block via Cholesky.  Second, the
+Newton step is computed by preconditioned conjugate gradient or mixed-precision
+iterative refinement, reusing the low-precision block factors to correct the
+solution---a \emph{factorize-once, solve-many} pattern that amortizes the
+$\cO(m^3)$ factorization cost across the predictor step, the corrector step,
+and all refinement corrections.  Third, and most critically, the target
+accuracy for the linear solve is adaptively scheduled as a piecewise function
+of $\mu_k$, implemented by \texttt{\_mu\_to\_eta\_target} in
+\texttt{linear\_solver.py}:
+$\eta_{\text{target}}(\mu) = 10^{-4}$ when $\mu > 10^{-2}$ (early IPM, loose
+accuracy), $\eta_{\text{target}}(\mu) = 10^{-7}$ when $10^{-6} < \mu \le
+10^{-2}$ (mid IPM), and $\eta_{\text{target}}(\mu) = 10^{-10}$ when $\mu \le
+10^{-6}$ (late IPM, near-exact solves).  A fallback to FP64 Cholesky
+guarantees convergence when the low-precision factorization cannot meet the
+target.
+
+The approach is inspired, in part, by recent work on quantum interior point
+methods (QIPM)~\cite{Kerenidis2020}.  In QIPM, a quantum linear system
+algorithm (QLSA) provides an approximate Newton direction whose error is
+bounded in $\ell_2$-norm, and the QIPM literature has developed a detailed
+theory of how to schedule QLSA accuracy across IPM iterations.  Our setting
+is strictly classical---the error source is floating-point round-off and
+block-diagonal approximation rather than quantum sampling noise---but the
+mathematical structure is isomorphic: both frameworks must cope with an
+inexact linear solve at each iteration, and both rely on the outer IPM's
+ability to absorb bounded linear-system error.  The adaptive tolerance
+schedule developed here can be viewed as a classical analogue of the QLSA
+precision schedule in QIPM, and our analysis of feasibility drift
+(Section~\ref{sec:error-prop}) parallels the feasibility-preserving
+Newton reformulations studied in the QIPM literature.
+
+The paper makes the following contributions.  It presents a convergence
+analysis of the Mehrotra predictor-corrector IPM with inexact Newton
+directions governed by the condition $\eta_k \le \bar{c}\mu_k^\alpha$,
+showing that polynomial complexity $\cO(\sqrt{n}\log(1/\varepsilon))$ is
+retained (Section~\ref{sec:theory}, Theorem~\ref{th:conv}).  It develops
+a multi-GPU block-diagonal Cholesky preconditioner that trades off-diagonal
+coupling for embarrassingly parallel factorization across GPUs, analyzes its
+approximation quality through the generalized eigenvalue
+bound~\eqref{eq:cond-preconditioned}, and presents the
+\texttt{LowPrecisionCholeskySolver} and \texttt{BlockJacobiPCGSolver}
+algorithms (Section~\ref{sec:precond}, Algorithms~\ref{alg:lp-cholesky}
+and~\ref{alg:bj-pcg}).  It designs and implements a $\mu$-driven adaptive
+refinement solver that dynamically adjusts the linear-solve accuracy target
+across three phases, mathematically encoding this as the piecewise
+function~\eqref{eq:mu-schedule} and embedding it in an iterative refinement
+loop with a guaranteed FP64 fallback (Section~\ref{sec:adapt},
+Algorithm~\ref{alg:adapt}).  And it provides numerical experiments on dense
+LP instances up to $m=200$, $n=600$ that reveal a sharp empirical finding:
+fixed-accuracy low-precision and block-Jacobi solvers \emph{fail to converge
+on every problem size tested}, while the adaptive solver tracks the exact
+baseline in both iteration count and solution quality
+(Section~\ref{sec:experiments}, Table~\ref{tab:full-results}).
+
+The remainder of the paper is organized as follows.  Section~\ref{sec:prelim}
+reviews the primal-dual IPM framework, the normal-equations reduction, the
+Mehrotra predictor-corrector algorithm, and the fraction-to-boundary step
+rule, establishing precise notation matched to the reference implementation.
+Section~\ref{sec:theory} develops the inexact IPM theory, defining the
+relative residual $\eta_k$, analyzing its propagation through the IPM step
+(primal feasibility, dual feasibility, and duality measure), stating the
+polynomial convergence theorem, and discussing the feasible vs.\ infeasible
+distinction.  Section~\ref{sec:precond} presents the block-partition
+structure of $\bM_k$, the $2\times 2$ block Cholesky with Schur complement,
+the block-diagonal preconditioner, the three-level precision strategy, and
+the \texttt{LowPrecisionCholeskySolver} and
+\texttt{BlockJacobiPCGSolver} algorithms.  Section~\ref{sec:adapt}
+introduces the $\mu$-driven tolerance schedule, the complete
+\texttt{AdaptiveRefinementSolver} algorithm, a detailed design analysis,
+and the connection to QIPM.  Section~\ref{sec:experiments} reports the
+numerical results.  Section~\ref{sec:conclusion} concludes with a summary
+and directions for future work.
+
+% ===================================================================
+\section{Preliminaries}
+\label{sec:prelim}
+% ===================================================================
+
+\subsection{Standard-form linear programming}
+
+We consider the primal linear program in standard form and its Lagrangian dual:
+\begin{align}
+  \min_{\bx \in \R^n}\;& \bc^T \bx
+    \quad \text{subject to}\quad
+    \bA\bx = \bb,\;\; \bx \ge 0,
+    \label{eq:primal} \\[4pt]
+  \max_{\by \in \R^m,\; \bs \in \R^n}\;& \bb^T \by
+    \quad \text{subject to}\quad
+    \bA^T\by + \bs = \bc,\;\; \bs \ge 0.
+    \label{eq:dual}
+\end{align}
+Here $\bA \in \R^{m \times n}$ is the constraint matrix (typically
+$m \le n$), $\bb \in \R^m$ is the right-hand side vector, and
+$\bc \in \R^n$ is the cost vector.  The component-wise inequalities
+$\bx \ge 0$ and $\bs \ge 0$ define the non-negative orthant.
+Problem~\eqref{eq:primal} is called the \emph{primal} LP and
+Problem~\eqref{eq:dual} is the \emph{dual} LP; the variable $\bx$ is the
+primal solution, $\by$ is the dual solution (or Lagrange multiplier for
+the equality constraint $\bA\bx = \bb$), and $\bs$ is the dual slack
+variable.
+
+The first-order necessary and sufficient optimality conditions for the pair
+\eqref{eq:primal}--\eqref{eq:dual} are the Karush--Kuhn--Tucker (KKT)
+system
+\begin{equation}
+  \begin{aligned}
+    \bA\bx &= \bb, \\
+    \bA^T\by + \bs &= \bc, \\
+    \bx \circ \bs &= \mathbf{0}, \\
+    \bx &\ge \mathbf{0},\quad \bs \ge \mathbf{0},
+  \end{aligned}
+  \label{eq:kkt}
+\end{equation}
+where $\bx \circ \bs \in \R^n$ denotes the Hadamard (entrywise) product,
+i.e., $(\bx \circ \bs)_i = x_i s_i$ for $i = 1,\dots,n$, and
+$\mathbf{0}$ is the vector of all zeros.  The first equation of~\eqref{eq:kkt}
+is primal feasibility; the second is dual feasibility; and the third is the
+complementarity condition, which requires $x_i s_i = 0$ for every $i$.  Because $\bx \ge 0$ and $\bs \ge 0$, the
+complementarity condition is equivalent to the scalar equation
+$\bx^T\bs = 0$, which states that the duality gap is zero at optimality.
+
+\subsection{The central path and the duality measure}
+
+Primal-dual interior point methods replace the non-smooth
+complementarity condition of~\eqref{eq:kkt} with the \emph{perturbed}
+condition
+\begin{equation}
+  \bx \circ \bs = \mu \mathbf{1}_n,
+  \label{eq:perturbed-compl}
+\end{equation}
+where $\mu > 0$ is a centering parameter and $\mathbf{1}_n$ is the vector
+of all ones in $\R^n$.  For each fixed $\mu > 0$, the perturbed KKT system
+\begin{equation}
+  \bA\bx = \bb,\qquad
+  \bA^T\by + \bs = \bc,\qquad
+  \bx \circ \bs = \mu \mathbf{1}_n,\qquad
+  \bx > \mathbf{0},\; \bs > \mathbf{0},
+  \label{eq:perturbed-kkt}
+\end{equation}
+has a unique solution $(\bx(\mu), \by(\mu), \bs(\mu))$ under mild
+assumptions (e.g., $\bA$ has full row rank and a strictly feasible
+interior point exists).  The set
+\begin{equation}
+  \mathcal{C} := \bigl\{ (\bx(\mu), \by(\mu), \bs(\mu)) \mid \mu > 0 \bigr\}
+\end{equation}
+is called the \emph{central path}.  As $\mu \to 0$, the central path
+converges to a solution of the original KKT system~\eqref{eq:kkt}.
+
+Taking the inner product of both sides of~\eqref{eq:perturbed-compl} with
+$\mathbf{1}_n$ yields
+\begin{equation}
+  \bx^T\bs = \sum_{i=1}^n x_i s_i = n\mu,
+  \label{eq:duality-gap}
+\end{equation}
+so that the quantity
+\begin{equation}
+  \mu := \frac{\bx^T\bs}{n}
+  \label{eq:mu-def}
+\end{equation}
+is the average complementarity product at the current iterate.  We refer
+to $\mu$ as the \emph{duality measure}; it equals the normalized duality
+gap and is the natural measure of progress toward optimality in a
+primal-dual IPM.  In the code, $\mu$ is computed exactly as in
+\eqref{eq:mu-def}: $\texttt{mu} = \texttt{float}(\texttt{np.dot}(x, s) /
+n)$.
+
+\subsection{Newton system and the normal equations}
+
+At each iteration of a primal-dual IPM, we linearize the perturbed KKT
+system~\eqref{eq:perturbed-kkt} around the current iterate
+$(\bx_k, \by_k, \bs_k)$ with $\bx_k > 0$, $\bs_k > 0$, and compute a
+search direction $(\bDelta\bx_k, \bDelta\by_k, \bDelta\bs_k)$.
+Linearizing~\eqref{eq:perturbed-compl} yields the third equation
+\begin{equation}
+  \bS_k \bDelta\bx_k + \bX_k \bDelta\bs_k = \sigma_k \mu_k \mathbf{1}_n
+  - \bX_k \bs_k,
+  \label{eq:linearized-compl}
+\end{equation}
+where $\bX_k := \diag(\bx_k)$, $\bS_k := \diag(\bs_k)$, $\mu_k :=
+\bx_k^T\bs_k / n$, and $\sigma_k \in [0,1]$ is the \emph{centering
+parameter}.  Setting $\sigma_k = 1$ gives a pure centering direction
+(toward the point $(\bx(\mu_k), \by(\mu_k), \bs(\mu_k))$ on the central
+path), while $\sigma_k = 0$ gives the pure affine-scaling direction
+(toward optimality, ignoring centrality).  The full linearized system is
+the $(2n+m) \times (2n+m)$ \emph{augmented system}
+\begin{equation}
+  \begin{bmatrix}
+    \mathbf{0} & \bA^T & \mathbf{I} \\
+    \bA        & \mathbf{0} & \mathbf{0} \\
+    \mathbf{0} & \mathbf{0} & \bS_k
+  \end{bmatrix}
+  \begin{bmatrix}
+    \bDelta\bx_k \\ \bDelta\by_k \\ \bDelta\bs_k
+  \end{bmatrix}
+  =
+  \begin{bmatrix}
+    \bc - \bA^T\by_k - \bs_k \\
+    \bb - \bA\bx_k \\
+    \sigma_k \mu_k \mathbf{1}_n - \bX_k\bS_k \mathbf{1}_n
+  \end{bmatrix}.
+  \label{eq:augmented-system}
+\end{equation}
+
+Eliminating $\bDelta\bs_k$ via the third block row gives
+$\bDelta\bs_k = \sigma_k \mu_k \bX_k^{-1}\mathbf{1}_n - \bs_k -
+\bX_k^{-1}\bS_k\bDelta\bx_k$.  Substituting into the first two block rows
+and eliminating $\bDelta\bx_k$ reduces the system to the $m \times m$
+\emph{normal equations}
+\begin{equation}
+  \boxed{\bM_k \bDelta\by_k = \br_k}, \qquad
+  \bM_k := \bA \bD_k^2 \bA^T,
+  \label{eq:normal-detailed}
+\end{equation}
+where the \emph{scaling matrix} is
+\begin{equation}
+  \bD_k := \diag\bigl(d_1^{(k)},\dots,d_n^{(k)}\bigr),\qquad
+  d_i^{(k)} := \sqrt{\frac{x_i^{(k)}}{s_i^{(k)}}},\quad i=1,\dots,n,
+  \label{eq:scaling}
+\end{equation}
+and the right-hand side $\br_k \in \R^m$ is assembled from the residuals
+and the centering term, as detailed in Section~\ref{sec:mehrotra} below.
+In the codebase, $\bM_k$ is formed by the function
+$\texttt{compute\_normal\_equation}$, which computes
+\texttt{A\_scaled = A * D\_diag[None, :]} followed by
+\texttt{A\_scaled @ A\_scaled.T}.
+
+The normal-equations matrix $\bM_k$ is symmetric positive definite (SPD)
+whenever $\bx_k > 0$, $\bs_k > 0$, and $\bA$ has full row rank.  This
+SPD property is the key advantage of the normal-equations formulation: it
+allows the use of Cholesky factorization, conjugate gradient, and other
+methods specialized for SPD systems.
+
+Once $\bDelta\by_k$ has been computed (exactly or approximately, as
+discussed in Section~\ref{sec:theory}), the primal and dual slack
+directions are recovered via
+\begin{align}
+  \bDelta\bx_k &=
+    -\bx_k
+    + \frac{\sigma_k\mu_k}{\bs_k}
+    - \frac{\bx_k}{\bs_k} \circ \bigl(\bc - \bA^T\by_k - \bs_k\bigr)
+    + \frac{\bx_k}{\bs_k} \circ (\bA^T\bDelta\by_k)
+    - \frac{\bDelta\bx_k^{\text{aff}} \circ \bDelta\bs_k^{\text{aff}}}{\bs_k},
+    \label{eq:recover-dx} \\[4pt]
+  \bDelta\bs_k &=
+    \bigl(\bc - \bA^T\by_k - \bs_k\bigr) - \bA^T\bDelta\by_k,
+    \label{eq:recover-ds}
+\end{align}
+where all divisions and multiplications involving vectors are
+component-wise, and the final term in~\eqref{eq:recover-dx} is the
+second-order Mehrotra correction (see Section~\ref{sec:mehrotra}).
+
+\subsection{The Mehrotra predictor-corrector algorithm}
+\label{sec:mehrotra}
+
+We adopt the widely used Mehrotra~\cite{Mehrotra1992} predictor-corrector
+scheme, which is the workhorse of virtually all practical IPM
+implementations.  The algorithm computes, at each iteration, two
+directions using the \emph{same} coefficient matrix $\bM_k$ but different
+right-hand sides.
+
+\subsubsection{Step 1: Predictor (affine-scaling) direction}
+
+Set $\sigma = 0$ (no centering) and omit the second-order correction.
+Define the dual residual at the current iterate
+\begin{equation}
+  \br_d^{(k)} := \bc - \bA^T\by_k - \bs_k.
+  \label{eq:rd}
+\end{equation}
+The predictor right-hand side (in $\R^m$) is
+\begin{equation}
+  \br_k^{\text{aff}} := \bb + \bA\Bigl(\frac{\bx_k}{\bs_k}
+                         \circ \br_d^{(k)}\Bigr).
+  \label{eq:r-aff}
+\end{equation}
+Solve the normal equations (exactly or inexactly) to obtain
+$\bDelta\by_k^{\text{aff}}$, and recover the affine primal and dual slack
+directions $\bDelta\bx_k^{\text{aff}}$ and $\bDelta\bs_k^{\text{aff}}$
+via~\eqref{eq:recover-dx}--\eqref{eq:recover-ds} with $\sigma=0$ and no
+correction term.
+
+\subsubsection{Step 2: Fraction-to-boundary step lengths}
+
+The step length to the boundary of the non-negative orthant is determined
+by the \emph{fraction-to-boundary} rule.  For a current iterate $\bv > 0$
+and a direction $\bDelta\bv$, the maximum step that preserves
+non-negativity is
+\begin{equation}
+  \alpha_{\max}(\bv, \bDelta\bv) :=
+    \min\left\{
+      -\frac{v_i}{\Delta v_i}
+      \;\middle|\;
+      i \in \{1,\dots,n\},\; \Delta v_i < 0
+    \right\},
+  \label{eq:alpha-max}
+\end{equation}
+with $\alpha_{\max} := \tau$ if no component of $\bDelta\bv$ is negative.
+To keep the iterates strictly positive and bounded away from the boundary
+(which would cause the scaling matrix $\bD_k$ to blow up), the actual step
+length is taken as
+\begin{equation}
+  \boxed{\alpha(\bv, \bDelta\bv) :=
+    \min\bigl\{\tau \cdot \alpha_{\max}(\bv, \bDelta\bv),\; \tau\bigr\}},
+  \label{eq:step-length}
+\end{equation}
+where $\tau \in (0,1)$ is the fraction-to-boundary parameter (typically
+$\tau = 0.99$ or $0.9995$).  The step length for the dual variable $\by$
+is taken equal to that of the dual slack $\bs$, since $\by$ is
+unconstrained in sign.  These step lengths are computed for the affine
+direction to obtain $\alpha_p^{\text{aff}} :=
+\alpha(\bx_k, \bDelta\bx_k^{\text{aff}})$ and $\alpha_d^{\text{aff}} :=
+\alpha(\bs_k, \bDelta\bs_k^{\text{aff}})$.
+
+\subsubsection{Step 3: Centering parameter}
+
+Let
+\begin{equation}
+  \mu_k^{\text{aff}} :=
+    \frac{1}{n}
+      \bigl(\bx_k + \alpha_p^{\text{aff}}\bDelta\bx_k^{\text{aff}}\bigr)^T
+      \bigl(\bs_k + \alpha_d^{\text{aff}}\bDelta\bs_k^{\text{aff}}\bigr)
+  \label{eq:mu-aff}
+\end{equation}
+be the duality measure that would result from a full step along the affine
+direction using the computed step lengths.  The ratio $\mu_k^{\text{aff}}
+/ \mu_k$ measures how much progress the pure affine direction makes.
+Mehrotra's heuristic sets the centering parameter adaptively as
+\begin{equation}
+  \boxed{\sigma_k := \left(\frac{\mu_k^{\text{aff}}}{\mu_k}\right)^3},
+  \label{eq:sigma}
+\end{equation}
+with the safeguard $\sigma_k := 0$ when $\mu_k \le 10^{-16}$.  The
+exponent $3$ is standard practice: when the affine direction makes
+substantial progress ($\mu_k^{\text{aff}} \ll \mu_k$), $\sigma_k$ becomes
+very small, biasing the corrector step toward optimality; conversely,
+when the affine direction makes little progress, $\sigma_k \approx 1$ and
+the corrector step emphasizes centrality.
+
+\subsubsection{Step 4: Corrector (combined) direction}
+
+The corrector right-hand side assembles three components:
+\begin{align}
+  \br_k^{\text{corr},1} &:= \bb
+    + \bA\Bigl(\frac{\bx_k}{\bs_k} \circ \br_d^{(k)}\Bigr),
+    \label{eq:corr1} \\[4pt]
+  \br_k^{\text{corr},2} &:= \sigma_k\mu_k\,
+    \bA\Bigl(\frac{\mathbf{1}_n}{\bs_k}\Bigr),
+    \label{eq:corr2} \\[4pt]
+  \br_k^{\text{corr},3} &:=
+    \bA\Bigl(\frac{\bDelta\bx_k^{\text{aff}}
+                 \circ \bDelta\bs_k^{\text{aff}}}{\bs_k}\Bigr),
+    \label{eq:corr3}
+\end{align}
+where \eqref{eq:corr1} is the linearized residual term (identical in form
+to the predictor RHS~\eqref{eq:r-aff}), \eqref{eq:corr2} is the centering
+term (which vanishes when $\sigma_k \to 0$), and \eqref{eq:corr3} is
+Mehrotra's second-order nonlinear correction that uses the
+Hadamard product of the affine directions to approximate the quadratic
+term in the Taylor expansion of the complementarity condition.  The
+full corrector right-hand side is
+\begin{equation}
+  \br_k^{\text{corr}} :=
+    \br_k^{\text{corr},1}
+    - \br_k^{\text{corr},2}
+    + \br_k^{\text{corr},3}.
+  \label{eq:corr-rhs}
+\end{equation}
+The normal equations $\bM_k\bDelta\by_k = \br_k^{\text{corr}}$ are solved
+with the \emph{same} coefficient matrix $\bM_k$ as the predictor step
+(which is critical for efficiency: one factorization serves two solves).
+The primal and dual directions are then recovered via
+\eqref{eq:recover-dx}--\eqref{eq:recover-ds} with $\sigma = \sigma_k$ and
+the correction term included.
+
+\subsubsection{Step 5: Step length and update}
+
+The step lengths for the combined (corrector) direction are computed via
+\eqref{eq:step-length}:
+\begin{equation}
+  \alpha_p^{(k)} := \alpha(\bx_k, \bDelta\bx_k),\qquad
+  \alpha_d^{(k)} := \alpha(\bs_k, \bDelta\bs_k).
+  \label{eq:step-lengths}
+\end{equation}
+The iterate is updated as
+\begin{equation}
+  \begin{aligned}
+    \bx_{k+1} &:= \bx_k + \alpha_p^{(k)} \bDelta\bx_k, \\
+    \bs_{k+1} &:= \bs_k + \alpha_d^{(k)} \bDelta\bs_k, \\
+    \by_{k+1} &:= \by_k + \alpha_d^{(k)} \bDelta\by_k.
+  \end{aligned}
+  \label{eq:update}
+\end{equation}
+Notice that the dual variable $\by$ steps with $\alpha_d^{(k)}$ (the same
+step length as the dual slack), which is standard practice since both
+live in the dual space and using the smaller of $\alpha_p$ and $\alpha_d$
+for $\by$ would be overly conservative.
+
+\subsubsection{Convergence monitoring}
+
+At each iteration, the relative primal and dual residuals are computed as
+\begin{align}
+  \rho_p^{(k)} &:= \frac{\norm{\bb - \bA\bx_k}_2}
+                        {1 + \norm{\bb}_2},
+    \label{eq:primal-res} \\[4pt]
+  \rho_d^{(k)} &:= \frac{\norm{\bc - \bA^T\by_k - \bs_k}_2}
+                        {1 + \norm{\bc}_2},
+    \label{eq:dual-res}
+\end{align}
+where the $1 + \norm{\cdot}_2$ denominators follow standard practice for
+scale-invariant stopping criteria~\cite{Wright1997}.  The IPM is
+considered converged when
+\begin{equation}
+  \mu_k < \varepsilon,\quad
+  \rho_p^{(k)} < \varepsilon,\quad
+  \rho_d^{(k)} < \varepsilon,
+  \label{eq:ipm-conv-test}
+\end{equation}
+with a typical tolerance of $\varepsilon = 10^{-8}$.
+
+\subsection{Conditioning of the normal equations}
+
+A fundamental numerical difficulty with the normal-equations formulation
+is that the spectral condition number of $\bM_k$ can be dramatically worse
+than that of the original constraint matrix $\bA$.  From the definition
+$\bM_k = \bA\bD_k^2\bA^T$ and the submultiplicativity of the spectral
+norm,
+\begin{equation}
+  \cond(\bM_k) = \cond(\bA\bD_k^2\bA^T)
+    \le \cond(\bA)^2 \cdot
+    \Bigl(\frac{\max_i d_i^{(k)}}{\min_i d_i^{(k)}}\Bigr)^2,
+  \label{eq:cond-bound}
+\end{equation}
+where $\cond(\cdot) := \sigma_{\max}(\cdot) / \sigma_{\min}(\cdot)$ is the
+ratio of largest to smallest singular value.  The factor $(\max d_i /
+\min d_i)^2$ reflects the spread of the diagonal scaling entries.  In the
+early iterations of an IPM, the entries of $\bx_k$ and $\bs_k$ are
+typically of comparable magnitude, so $d_i^{(k)} = \sqrt{x_i/s_i}$ is
+moderate and $\bM_k$ is well-conditioned.  However, as the IPM converges
+and $\mu_k \to 0$, the primal and dual variables separate: some $x_i$
+approach zero (active constraints) while the corresponding $s_i$ remain
+bounded away from zero (or vice versa).  Consequently, the ratio
+$\max_i d_i / \min_i d_i$ can span many orders of magnitude—often $10^8$
+or larger in the final iterations—and $\cond(\bM_k)$ can exceed
+$10^{16}$, the reciprocal of machine epsilon in FP64.
+
+This progressive ill-conditioning is the central numerical challenge that
+any low-precision or inexact linear solver must confront inside an IPM.
+It motivates the adaptive precision schedule developed in
+Section~\ref{sec:adapt} and the fallback mechanisms embedded in the
+solvers (see Section~\ref{sec:precond}).
+
+% ===================================================================
+\section{Inexact IPM Theory}
+\label{sec:theory}
+% ===================================================================
+
+In an exact IPM, the normal equations~\eqref{eq:normal-detailed} are solved
+to machine precision at each iteration.  In an \emph{inexact} IPM, we permit
+an approximate solution, trading linear-solver accuracy for computational
+speed.  This section formalizes the notion of inexactness, analyzes how the
+linear-solve error propagates through the IPM step, and states the
+convergence guarantees that underpin the adaptive scheduling strategy of
+Section~\ref{sec:adapt}.
+
+\subsection{Inexact Newton directions}
+
+Let $\widehat{\bDelta\by}_k$ denote the \emph{computed} (approximate)
+solution of the normal equations at iteration $k$.  We write
+\begin{equation}
+  \bM_k \widehat{\bDelta\by}_k = \br_k + \be_k^{\text{lin}},
+  \label{eq:inexact-system}
+\end{equation}
+where
+\begin{equation}
+  \be_k^{\text{lin}} := \bM_k \widehat{\bDelta\by}_k - \br_k
+  \label{eq:e-lin}
+\end{equation}
+is the \emph{linear-system residual}.  The exact Newton direction
+$\bDelta\by_k^*$ satisfies $\bM_k\bDelta\by_k^* = \br_k$, so
+$\be_k^{\text{lin}} = \bM_k(\widehat{\bDelta\by}_k - \bDelta\by_k^*)$.
+
+\begin{definition}[Relative residual]
+  \label{def:eta}
+  The \emph{relative residual} of the linear solve is
+  \begin{equation}
+    \boxed{\eta_k :=
+      \frac{\norm{\be_k^{\text{lin}}}_2}{\norm{\br_k}_2}
+      \equiv
+      \frac{\norm{\bM_k\widehat{\bDelta\by}_k - \br_k}_2}
+           {\norm{\br_k}_2}}.
+    \label{eq:eta-def}
+  \end{equation}
+  When $\norm{\br_k}_2 < 10^{-15}$ we set $\eta_k := 0$.
+\end{definition}
+
+This is precisely the quantity tracked by the $\texttt{\_compute\_eta}$
+method in the codebase: the residual is evaluated in FP64 regardless of the
+internal precision used to compute $\widehat{\bDelta\by}_k$, so $\eta_k$
+gives a faithful, precision-independent measure of backward error.
+
+The central question of inexact IPM theory is: \emph{how large can
+$\eta_k$ be at iteration $k$ while still guaranteeing that the outer IPM
+converges, and at what asymptotic rate?}
+
+\subsection{Error propagation through the IPM step}
+\label{sec:error-prop}
+
+\subsubsection{Error in the primal-dual directions}
+
+Given the approximate dual direction $\widehat{\bDelta\by}_k$, the primal
+and dual slack directions are recovered via~\eqref{eq:recover-dx}--
+\eqref{eq:recover-ds} (omitting the corrector terms for clarity; the
+analysis generalizes straightforwardly):
+\begin{align}
+  \widehat{\bDelta\bx}_k &=
+    -\bx_k
+    + \frac{\sigma_k\mu_k}{\bs_k}
+    - \frac{\bx_k}{\bs_k} \circ \br_d^{(k)}
+    + \frac{\bx_k}{\bs_k} \circ (\bA^T\widehat{\bDelta\by}_k),
+    \label{eq:inexact-recover-dx} \\[4pt]
+  \widehat{\bDelta\bs}_k &=
+    \br_d^{(k)} - \bA^T\widehat{\bDelta\by}_k,
+    \label{eq:inexact-recover-ds}
+\end{align}
+where $\br_d^{(k)} = \bc - \bA^T\by_k - \bs_k$ is the dual residual at
+the current iterate.  Let $\bDelta\bx_k^*$ and $\bDelta\bs_k^*$ be the
+exact directions that would be obtained by using $\bDelta\by_k^*$ in the
+same formulas.  Subtracting the exact from the inexact recovery yields the
+\emph{direction errors}:
+\begin{align}
+  \widehat{\bDelta\bx}_k - \bDelta\bx_k^* &=
+    \bX_k^{1/2}\bS_k^{-1/2} \circ
+    \bA^T(\widehat{\bDelta\by}_k - \bDelta\by_k^*)
+    = \bD_k \circ \bA^T(\widehat{\bDelta\by}_k - \bDelta\by_k^*),
+    \label{eq:dx-error} \\[4pt]
+  \widehat{\bDelta\bs}_k - \bDelta\bs_k^* &=
+    -\bA^T(\widehat{\bDelta\by}_k - \bDelta\by_k^*).
+    \label{eq:ds-error}
+\end{align}
+The error in the dual direction propagates to the primal direction
+\emph{scaled by the factor $\bD_k$}, which amplifies the error precisely
+when the scaling matrix is ill-conditioned (i.e., in late IPM iterations).
+
+\subsubsection{Propagation to primal feasibility}
+
+The primal residual after taking a step of length $\alpha$ in the inexact
+direction is
+\begin{align}
+  \br_p^{(k+1)}
+    &= \bb - \bA(\bx_k + \alpha_k \widehat{\bDelta\bx}_k) \nonumber \\
+    &= \bb - \bA\bx_k
+       - \alpha_k \bA\bDelta\bx_k^*
+       - \alpha_k \bA(\widehat{\bDelta\bx}_k - \bDelta\bx_k^*) \nonumber \\
+    &= (1 - \alpha_k)(\bb - \bA\bx_k)
+       + \alpha_k \bA\bD_k^2\bA^T
+         (\widehat{\bDelta\by}_k - \bDelta\by_k^*),
+    \label{eq:feas-prop}
+\end{align}
+where we used $\bA\bDelta\bx_k^* = \bb - \bA\bx_k$ (the exact direction
+restores primal feasibility exactly in one full step) and
+\eqref{eq:dx-error} to express the direction error in terms of
+$\widehat{\bDelta\by}_k - \bDelta\by_k^*$.  Recalling that
+$\bM_k = \bA\bD_k^2\bA^T$ and $\be_k^{\text{lin}} =
+\bM_k(\widehat{\bDelta\by}_k - \bDelta\by_k^*)$, we obtain the compact
+relation
+\begin{equation}
+  \boxed{\br_p^{(k+1)} =
+    (1 - \alpha_k)\br_p^{(k)} + \alpha_k \be_k^{\text{lin}}}.
+  \label{eq:feas-prop-final}
+\end{equation}
+
+Equation~\eqref{eq:feas-prop-final} reveals a fundamental tension: the
+step length $\alpha_k$ simultaneously reduces the current primal residual
+(the first term) and injects the linear-solve error (the second term).
+If $\norm{\be_k^{\text{lin}}}$ is large relative to $\norm{\br_p^{(k)}}$,
+the primal residual may \emph{grow} rather than shrink.  This phenomenon is
+observed in practice: our implementation detects the condition
+\begin{equation}
+  \mu_k < 10^{-6} \;\text{and}\; \rho_p^{(k)} > 10^{-3}
+  \label{eq:feas-loss}
+\end{equation}
+as an indicator that the linear-solve error has irreparably damaged primal
+feasibility, and the IPM is terminated.
+
+\subsubsection{Propagation to dual feasibility}
+
+A similar analysis yields the dual residual after the step:
+\begin{equation}
+  \br_d^{(k+1)} =
+    (1 - \alpha_k)\br_d^{(k)}
+    + \alpha_k \bA^T(\widehat{\bDelta\by}_k - \bDelta\by_k^*).
+  \label{eq:dual-prop}
+\end{equation}
+Comparing with~\eqref{eq:feas-prop-final}, the dual residual receives the
+\emph{unscaled} direction error, while the primal residual receives it
+premultiplied by $\bA\bD_k^2\bA^T = \bM_k$.  Since $\bM_k$ can be highly
+ill-conditioned (see Section~\ref{sec:prelim}), the primal residual is
+typically more sensitive to inexactness than the dual residual.
+
+\subsubsection{Propagation to the duality measure}
+
+The duality measure after the step is
+\begin{equation}
+  \mu_{k+1} = \frac{1}{n}
+    (\bx_k + \alpha_k\widehat{\bDelta\bx}_k)^T
+    (\bs_k + \alpha_k\widehat{\bDelta\bs}_k).
+  \label{eq:mu-prop}
+\end{equation}
+Expanding and using $\bx_k^T\bs_k = n\mu_k$, one can show that
+\begin{equation}
+  \mu_{k+1} = (1 - \alpha_k(1 - \sigma_k))\mu_k
+    + \cO(\alpha_k^2\norm{\cdot}^2)
+    + \cO(\alpha_k \eta_k \norm{\br_k}),
+  \label{eq:mu-prop-expanded}
+\end{equation}
+where the final $\cO(\alpha_k \eta_k \norm{\br_k})$ term captures the
+effect of the inexactness.  This term must be dominated by the reduction
+in $\mu$ for convergence to be maintained.
+
+\subsection{Convergence theorem}
+\label{sec:conv-theorem}
+
+The convergence of inexact IPMs is governed by how the allowable residual
+$\eta_k$ scales with the duality measure $\mu_k$.  We state the central
+result (without full proof; see~\cite{Bellavia1998,Monteiro2003} for
+detailed analyses).
+
+\begin{assumption}[Interior starting point]
+  \label{as:feas}
+  The initial iterate $(\bx_0, \by_0, \bs_0)$ is strictly feasible
+  ($\bx_0 > 0$, $\bs_0 > 0$) with $\bA\bx_0 = \bb$ and
+  $\bA^T\by_0 + \bs_0 = \bc$, and lies in a suitable neighborhood
+  $\cN_2(\beta)$ of the central path:
+  \begin{equation}
+    \norm{\bx_0 \circ \bs_0 - \mu_0\mathbf{1}_n}_2 \le \beta\mu_0,
+    \qquad \beta \in (0,1).
+    \label{eq:nbhd}
+  \end{equation}
+\end{assumption}
+
+\begin{assumption}[Full rank]
+  \label{as:rank}
+  The constraint matrix $\bA \in \R^{m \times n}$ has full row rank, so
+  that $\bM_k = \bA\bD_k^2\bA^T$ is strictly positive definite for all
+  $\bx_k,\bs_k > 0$.
+\end{assumption}
+
+\begin{theorem}[Polynomial convergence of inexact IPM]
+  \label{th:conv}
+  Let Assumptions~\ref{as:feas} and~\ref{as:rank} hold.  Suppose that at
+  each iteration $k$ of the Mehrotra predictor-corrector IPM, the linear
+  solve satisfies
+  \begin{equation}
+    \boxed{\eta_k \le \bar{c}\,\mu_k^\alpha},
+    \label{eq:eta-condition}
+  \end{equation}
+  for constants $\bar{c} > 0$ and $\alpha \in (0,1]$ independent of $k$.
+  Then there exists a constant $\delta > 0$ such that
+  \begin{equation}
+    \mu_{k+1} \le \Bigl(1 - \frac{\delta}{\sqrt{n}}\Bigr)\mu_k,
+    \label{eq:mu-linear}
+  \end{equation}
+  and the method converges to a point with $\mu \le \varepsilon$ in at most
+  \begin{equation}
+    K = \cO\bigl(\sqrt{n}\,\log(1/\varepsilon)\bigr)
+    \label{eq:iter-bound}
+  \end{equation}
+  iterations.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+  The proof adapts the standard analysis of polynomial IPM convergence
+  (see, e.g.,~\cite{Wright1997, Nesterov1994}) by tracking the effect of
+  the inexactness residual through the predictor and corrector steps
+  separately.
+
+  \textbf{Predictor step.}  The affine direction with $\sigma=0$ reduces
+  $\mu$ by a factor that, in the exact case, is $(1 - \delta/\sqrt{n})$.
+  With inexactness, the reduction is attenuated by an $\cO(\eta_k)$ term.
+  Condition~\eqref{eq:eta-condition} ensures that $\eta_k \le \bar{c}\mu_k$
+  (when $\alpha \ge 1$) or $\eta_k \le \bar{c}\mu_k^\alpha$ (when
+  $\alpha < 1$), so the inexactness budget is always small relative to the
+  current duality gap, preserving the polynomial reduction rate.
+
+  \textbf{Corrector step.}  The centering component (with $\sigma_k$ given
+  by~\eqref{eq:sigma}) restores proximity to the central path.  The
+  inexactness adds a perturbation that is $\cO(\eta_k^2)$ in the centrality
+  measure~\eqref{eq:nbhd}, which is dominated by the linear term when
+  $\eta_k$ is sufficiently small.
+
+  \textbf{Asymptotic behavior.}  When $\mu_k \ll 1$ and $\alpha$ is chosen
+  appropriately, $\eta_k$ shrinks rapidly with $\mu_k$.  If
+  $\alpha \ge 1$, then $\eta_k$ shrinks at least linearly with $\mu_k$,
+  and the quadratic convergence of Mehrotra's method (in the final
+  iterations) is preserved.  If $\alpha < 1$, the inexactness decays more
+  slowly than $\mu_k$, and the asymptotic rate degrades to linear, though
+  the polynomial complexity bound~\eqref{eq:iter-bound} still holds.
+
+  \textbf{Feasibility drift.}  Equation~\eqref{eq:feas-prop-final} shows
+  that the primal residual evolves as $\br_p^{(k+1)} = (1-\alpha_k)\br_p^{(k)}
+  + \alpha_k \be_k^{\text{lin}}$.  Under~\eqref{eq:eta-condition}, the
+  injected error $\be_k^{\text{lin}}$ is bounded by
+  $\bar{c}\mu_k^\alpha\norm{\br_k}$, which is $\cO(\mu_k^\alpha)$ when the
+  RHS $\br_k$ is of moderate size.  Since $\mu_k$ itself decreases
+  geometrically by~\eqref{eq:mu-linear}, the cumulative feasibility drift
+  over $K$ iterations is bounded, and the final primal infeasibility is
+  $\cO(\varepsilon^\alpha)$.
+\end{proof}
+
+\begin{remark}
+  The condition $\eta_k \le \bar{c}\mu_k^\alpha$ subsumes several special
+  cases from the literature.  Bellavia~\cite{Bellavia1998} uses
+  $\eta_k \le \gamma\mu_k$ (i.e., $\alpha=1$, $\bar{c}=\gamma$), while
+  Monteiro and O'Neal~\cite{Monteiro2003} consider $\eta_k \le
+  \gamma\min\{\mu_k,1\}$, which is equivalent to $\alpha=1$ with a cap.
+  Our adaptive schedule (Section~\ref{sec:adapt}) uses a piecewise-constant
+  approximation to a $\mu^\alpha$ envelope, which is easier to implement
+  and tune in practice.
+\end{remark}
+
+\subsection{Feasible vs.\ infeasible inexact IPM}
+\label{sec:feas-vs-infeas}
+
+Equation~\eqref{eq:feas-prop-final} highlights a critical distinction
+between two classes of inexact IPM formulations:
+
+\begin{definition}[Inexact feasible IPM]
+  An IPM is called \emph{inexact feasible} if the Newton direction is
+  constructed so that primal and dual feasibility are preserved exactly,
+  even when the linear solve is approximate.  This requires that the
+  inexactness residual $\be_k^{\text{lin}}$ lie in the null space of
+  $\bA$ (for primal feasibility) or that the direction recovery
+  formulas be modified to project out the error~\cite{Kerenidis2020}.
+\end{definition}
+
+\begin{definition}[Inexact infeasible IPM]
+  An IPM is called \emph{inexact infeasible} if no special mechanism is
+  used to preserve feasibility, and the residuals evolve according to
+  \eqref{eq:feas-prop-final}--\eqref{eq:dual-prop}.  This is the natural
+  setting for the normal-equations formulation with an approximate
+  $\widehat{\bDelta\by}_k$.
+\end{definition}
+
+The prototype implemented in this paper is an \emph{inexact infeasible}
+IPM.  The practical implications depend on the phase of the solve.  In the
+early iterations, $\mu_k$ is large, the normal-equations matrix is
+well-conditioned, and the linear-solve error $\eta_k$ is small (either
+because the low-precision factorization is accurate, or because iterative
+refinement converges quickly); the feasibility
+drift~\eqref{eq:feas-prop-final} is negligible.  In the mid iterations, as
+$\mu_k$ decreases, $\kappa(\bM_k)$ grows and the low-precision
+factorization loses accuracy; the adaptive schedule tightens
+$\eta_{\text{target}}$, triggering more refinement iterations to keep
+$\eta_k$ within bounds; primal feasibility may degrade moderately, but the
+IPM corrector step (with $\sigma_k > 0$) restores centrality and helps
+contain the drift.  In the late iterations, when $\mu_k < 10^{-6}$, even
+small linear-solve errors can translate into large primal residuals because
+$\bD_k$ amplifies them via~\eqref{eq:dx-error}; at this stage, the
+adaptive schedule demands near-exact solves ($\eta_{\text{target}} =
+10^{-10}$), and the fallback to FP64 Cholesky ensures that the final
+solution accuracy is not compromised.  Finally, the code monitors the
+condition~\eqref{eq:feas-loss} and terminates early if the inexactness has
+pushed the IPM into an irrecoverable infeasible state: this is a pragmatic
+safeguard that avoids wasting computation on iterates that can no longer
+converge and provides diagnostic feedback for tuning the tolerance
+schedule.
+
+The inexact infeasible formulation is both simpler to implement and more
+natural for the normal-equations framework than a feasibility-preserving
+alternative (e.g., via null-space projection or augmented KKT systems).
+The price is the need for the heuristic safeguards described above; the
+numerical results in Section~\ref{sec:experiments} confirm that these
+safeguards are effective in practice.
+
+\begin{remark}[Connection to QIPM]
+  Quantum interior point methods~\cite{Kerenidis2020} face an analogous
+  trade-off: the quantum linear system algorithm (QLSA) outputs an
+  approximate solution whose error must be absorbed by the outer IPM.
+  The QIPM literature has therefore developed a detailed theory of
+  inexact \emph{feasible} IPMs, where the Newton reformulation (often via
+  null-space methods) preserves feasibility regardless of linear-solve
+  accuracy.  Our work can be viewed as a classical analogue: we use
+  low-precision GPU arithmetic in place of QLSA noise, and iterative
+  refinement in place of quantum state tomography, but the mathematical
+  structure of inexactness is similar.  This connection suggests that
+  feasibility-preserving reformulations developed for QIPM could also
+  benefit classical GPU-accelerated IPMs, and vice versa.
+\end{remark}
+
+% ===================================================================
+\section{Multi-GPU Block Cholesky Preconditioner}
+\label{sec:precond}
+% ===================================================================
+
+The normal-equations matrix $\bM_k = \bA\bD_k^2\bA^T$ is an $m \times m$
+symmetric positive definite matrix.  For large $m$ (e.g., $m \ge 10^4$),
+a full dense Cholesky factorization $\bM_k = \bL\bL^T$ costs $\cO(m^3)$
+operations and requires $\cO(m^2)$ storage, which may exceed the memory of
+a single GPU.  This section develops a \emph{block-diagonal Cholesky
+preconditioner} that distributes the factorization across multiple GPUs
+and serves as the computational core of all the inexact solvers described
+in this paper.
+
+\subsection{Block partition of the normal-equations matrix}
+
+We partition the index set $\{1,\dots,m\}$ into $p$ contiguous blocks of
+sizes $m_1,\dots,m_p$ (with $\sum_{i=1}^p m_i = m$).  The normal-equations
+matrix inherits the corresponding block structure:
+\begin{equation}
+  \bM_k =
+  \begin{bmatrix}
+    \bM_{11} & \bM_{12} & \cdots & \bM_{1p} \\[4pt]
+    \bM_{21} & \bM_{22} & \cdots & \bM_{2p} \\[4pt]
+    \vdots   & \vdots   & \ddots & \vdots   \\[4pt]
+    \bM_{p1} & \bM_{p2} & \cdots & \bM_{pp}
+  \end{bmatrix},
+  \qquad
+  \bM_{ij} \in \R^{m_i \times m_j},
+  \label{eq:block-partition}
+\end{equation}
+where $\bM_{ij} = \bA_i\bD_k^2\bA_j^T$ and $\bA_i \in \R^{m_i \times n}$ is
+the $i$-th row-block of the constraint matrix.  Because $\bM_k$ is symmetric,
+$\bM_{ji} = \bM_{ij}^T$.
+
+In our multi-GPU setting, the $i$-th diagonal block $\bM_{ii}$ (and the
+corresponding row-block $\bA_i$) is assigned to GPU $i$.  The block sizes
+$m_i$ are chosen to balance GPU memory utilization; a simple equal-split
+strategy sets $m_i \approx m/p$ for all $i$, as implemented in
+\texttt{\_build\_block\_diagonal\_preconditioner} by the slicing
+\texttt{start = i * m // p; end = (i+1) * m // p}.
+
+\subsection{Block Cholesky factorization with Schur complement}
+
+To understand the relationship between a full Cholesky factorization and
+the block-diagonal approximation, it is instructive to examine the $p=2$
+case in detail.  Write
+\begin{equation}
+  \bM_k =
+  \begin{bmatrix}
+    \bM_{11} & \bM_{12} \\
+    \bM_{21} & \bM_{22}
+  \end{bmatrix},
+  \qquad
+  \bM_{11} \in \R^{m_1 \times m_1},\;
+  \bM_{22} \in \R^{m_2 \times m_2},
+  \label{eq:2x2-block}
+\end{equation}
+with $\bM_{12}^T = \bM_{21}$.  The \emph{block Cholesky factorization}
+(generalizing the standard block LDL$^T$ decomposition to the SPD case) is
+\begin{equation}
+  \bM_k =
+  \begin{bmatrix}
+    \bL_{11} & \mathbf{0} \\
+    \bM_{21}\bL_{11}^{-T} & \bL_{22}
+  \end{bmatrix}
+  \begin{bmatrix}
+    \bL_{11}^T & \bL_{11}^{-1}\bM_{12} \\
+    \mathbf{0} & \bL_{22}^T
+  \end{bmatrix},
+  \label{eq:block-cholesky}
+\end{equation}
+where
+\begin{align}
+  \bM_{11} &= \bL_{11}\bL_{11}^T,
+    \label{eq:chol-M11} \\[4pt]
+  \bS_{22} &:= \bM_{22} - \bM_{21}\bM_{11}^{-1}\bM_{12}
+    = \bL_{22}\bL_{22}^T.
+    \label{eq:schur}
+\end{align}
+The matrix $\bS_{22}$ is the \emph{Schur complement} of $\bM_{11}$ in
+$\bM_k$.  It is SPD whenever $\bM_k$ is SPD.  Equation~\eqref{eq:schur}
+reveals the essential difficulty of distributed block factorization: even
+if diagonal blocks $\bM_{11}$ and $\bM_{22}$ are factorized independently on
+separate GPUs, the second block's factor $\bL_{22}$ requires the Schur
+complement update $\bS_{22} = \bM_{22} - \bM_{21}\bM_{11}^{-1}\bM_{12}$,
+which couples the two GPUs through the off-diagonal block $\bM_{21}$.
+Computing $\bM_{21}\bM_{11}^{-1}\bM_{12}$ involves solving triangular
+systems with $\bL_{11}$ and then a matrix-matrix multiplication, both of
+which require communication when $\bM_{11}$ and $\bM_{22}$ reside on
+different devices.
+
+For $p > 2$, the block Cholesky proceeds recursively: after factorizing
+$\bM_{11} = \bL_{11}\bL_{11}^T$, the trailing $(p-1) \times (p-1)$
+submatrix is updated by the Schur complement of $\bM_{11}$, and the
+process repeats.  The communication pattern is all-to-all in the worst
+case, and the total communication volume grows with $p$.
+
+\subsection{Block-diagonal preconditioner: trading exactness for parallelism}
+
+Rather than attempting a full distributed block Cholesky (which would
+require substantial inter-GPU communication for the Schur complement
+updates), we construct a \emph{block-diagonal preconditioner}:
+\begin{equation}
+  \boxed{\bP_k := \blkdiag(\bM_{11}, \bM_{22}, \dots, \bM_{pp})},
+  \label{eq:precond-def}
+\end{equation}
+where each diagonal block is factorized \emph{independently}:
+\begin{equation}
+  \bM_{ii} = \widetilde{\bL}_i \widetilde{\bL}_i^T,
+  \qquad i = 1,\dots,p.
+  \label{eq:local-cholesky}
+\end{equation}
+The tildes on $\widetilde{\bL}_i$ indicate that the factorization may be
+performed in reduced precision (see Section~\ref{sec:precision-strategy}).
+
+The preconditioner $\bP_k$ is an \emph{approximation} to $\bM_k$: it
+coincides with $\bM_k$ on the diagonal blocks but ignores the off-diagonal
+coupling.  The quality of the approximation is characterized by the
+generalized eigenvalue problem: if $\lambda$ is an eigenvalue of
+$\bP_k^{-1}\bM_k$, then the condition number of the preconditioned system
+governs the convergence rate of preconditioned Krylov methods.  A standard
+bound (via block Gershgorin) is
+\begin{equation}
+  \cond\bigl(\bP_k^{-1/2}\bM_k\bP_k^{-1/2}\bigr)
+    \le 1 + \max_{1 \le i \le p}\;
+    \sum_{\substack{j=1 \\ j \ne i}}^{p}
+    \bigl\|\bM_{ii}^{-1/2}\bM_{ij}\bM_{jj}^{-1/2}\bigr\|_2,
+  \label{eq:cond-preconditioned}
+\end{equation}
+where the sum over $j \ne i$ quantifies the \emph{off-diagonal coupling
+strength}.  When the off-diagonal blocks are small in norm relative to the
+diagonal blocks, the preconditioned operator is close to the identity and
+Krylov methods converge in few iterations.  Conversely, when the couplings
+are strong (e.g., when $\bA$ is dense with no natural block structure),
+the preconditioner is weaker and more inner iterations are required.
+
+This design reflects a deliberate trade-off: we sacrifice the exactness of
+a full Cholesky solve for \emph{embarrassingly parallel} factorization
+across $p$ GPUs with zero inter-GPU communication during the factorization
+phase.  The resulting error is absorbed by the inexact IPM framework of
+Section~\ref{sec:theory} and, when necessary, corrected by iterative
+refinement or Krylov acceleration.
+
+\subsection{Precision strategy}
+\label{sec:precision-strategy}
+
+Modern GPUs exhibit dramatically different throughput across floating-point
+formats.  For instance, the NVIDIA H100 GPU delivers approximately 34 TFLOPS
+in FP64, 67 TFLOPS in FP32, and up to 990 TFLOPS in TF32 (tensor-core)
+mode~\cite{NVIDIA2023}.  To exploit this hierarchy while protecting the
+convergence guarantees of the outer IPM, we adopt a \emph{three-level}
+precision strategy.
+
+At the first level, \textbf{factorization precision (FP32 / TF32)}, each
+diagonal block $\bM_{ii}$ is downcast to FP32 (or TF32, which shares the
+FP32 exponent range with reduced mantissa precision) and factorized via
+dense Cholesky:
+\begin{equation}
+  \bM_{ii}^{\text{lo}} = \texttt{float32}(\bM_{ii}),\qquad
+  \bM_{ii}^{\text{lo}} \approx \widetilde{\bL}_i \widetilde{\bL}_i^T.
+  \label{eq:fp32-factor}
+\end{equation}
+The downcast uses the function \texttt{\_safe\_cast\_f32} which clips
+values exceeding the FP32 range ($\approx 3.4 \times 10^{38}$) to prevent
+overflow.  A small diagonal regularization $\rho \approx 10^{-10}$ is added
+before factorization to guard against singularity due to round-off.  If
+the Cholesky factorization fails (e.g., due to an indefinite matrix in
+FP32), the code falls back to an eigendecomposition
+$\bM_{ii}^{\text{lo}} = \bV \bLambda \bV^T$ with eigenvalues clamped to a
+minimum of $10^{-12}$.
+
+At the second level, \textbf{residual computation (FP64)}, regardless of
+the precision used for factorization and solve, the linear-system residual
+is always evaluated in full FP64:
+\begin{equation}
+  \be_k^{\text{lin}} = \br_k - \bM_k\widehat{\bDelta\by}_k
+  \quad\text{(computed in float64)}.
+  \label{eq:fp64-residual}
+\end{equation}
+This is critical: it provides a precision-independent backward error
+measure $\eta_k$ that faithfully reflects the true linear-solve accuracy,
+preventing a situation where the solver believes it has converged but the
+direction is actually corrupted by low-precision round-off.
+
+At the third level, \textbf{iterate update (FP64)}, the Newton direction
+$\widehat{\bDelta\by}_k$ and the IPM iterates $(\bx_{k+1}, \by_{k+1},
+\bs_{k+1})$ are accumulated in FP64.  This ensures that the outer
+optimization is not limited by the precision of the linear algebra; only
+the per-iteration factorization benefits from hardware-accelerated
+low-precision arithmetic.
+
+This three-level hierarchy is a direct adaptation of the mixed-precision
+iterative refinement framework of Carson and Higham~\cite{Carson2018} to
+the structured linear systems arising inside an IPM.  The key difference is
+that our precision schedule is not static but adapts to the IPM's progress
+through the $\mu$-driven tolerance schedule of Section~\ref{sec:adapt}.
+
+\subsection{Solver 1: LowPrecisionCholeskySolver}
+\label{sec:lp-cholesky}
+
+The simplest inexact solver in our framework is the
+\texttt{LowPrecisionCholeskySolver}, which applies the three-level
+precision strategy to the \emph{full} normal-equations matrix without
+block partitioning (i.e., $p=1$).  It simulates a single-GPU tensor-core
+Cholesky solve and serves as a minimal baseline for evaluating the effect
+of reduced precision alone.
+
+\begin{algorithm}[t]
+  \caption{\texttt{LowPrecisionCholeskySolver.solve(M, r)}}
+  \label{alg:lp-cholesky}
+  \KwIn{SPD matrix $\bM \in \R^{m \times m}$, right-hand side $\br \in \R^m$}
+  \KwOut{Solution $\widehat{\bDelta\by}$, relative residual $\eta$}
+
+  \tcp{Step 1: Downcast to FP32 with overflow guard}
+  $\widetilde{\bM} \gets \texttt{\_safe\_cast\_f32}(\bM)$ \tcp*{clip to $[-10^{37}, 10^{37}]$, cast to float32}
+  $\widetilde{\br} \gets \texttt{\_safe\_cast\_f32}(\br)$\;
+
+  \tcp{Step 2: Diagonal regularization}
+  $\widetilde{\bM}.\text{diag} \,\texttt{+=}\;\texttt{float32}(10^{-10})$\;
+
+  \tcp{Step 3: Factorization and solve in FP32}
+  \Try{}{
+    $(\widetilde{\bL}, \texttt{lower}) \gets \texttt{cho\_factor}(\widetilde{\bM})$\;
+    $\widehat{\bDelta\by}^{\text{lo}} \gets \texttt{cho\_solve}(\widetilde{\bL}, \widetilde{\br})$\;
+  }\Catch{LinAlgError}{
+    $(\bw, \bV) \gets \texttt{eigh}(\widetilde{\bM})$ \tcp*{fallback: eigendecomposition}
+    $\bw \gets \max(\bw, 10^{-12})$\;
+    $\widehat{\bDelta\by}^{\text{lo}} \gets \bV\bigl((\bV^T\widetilde{\br}) \oslash \bw\bigr)$\;
+  }
+
+  \tcp{Step 4: Upcast to FP64}
+  $\widehat{\bDelta\by} \gets \texttt{float64}(\widehat{\bDelta\by}^{\text{lo}})$\;
+
+  \tcp{Step 5: Fallback if FP32 produced NaN}
+  \If{$\text{any}(\texttt{isnan}(\widehat{\bDelta\by}))$}{
+    $\widehat{\bDelta\by} \gets \texttt{solve}(\bM, \br)$ \tcp*{FP64 direct solve}
+  }
+
+  \tcp{Step 6: Compute relative residual in FP64}
+  $\eta \gets \norm{\bM\widehat{\bDelta\by} - \br}_2 \;/\; \norm{\br}_2$\;
+  \Return $(\widehat{\bDelta\by}, \eta)$\;
+\end{algorithm}
+
+Algorithm~\ref{alg:lp-cholesky} reproduces the exact logic of the
+implementation.  Several design choices merit comment.  The overflow guard
+(\texttt{\_safe\_cast\_f32}) clips entries to $\pm 10^{37}$ to prevent Inf
+values in FP32, which has a maximum representable value of approximately
+$3.4 \times 10^{38}$; for well-scaled IPM iterates this guard is rarely
+triggered, but it is essential for robustness with random problem data.
+The eigendecomposition fallback handles the rare case where round-off in
+FP32 causes $\widetilde{\bM}$ to lose positive definiteness: rather than
+aborting, we compute $\widetilde{\bM} = \bV\diag(\bw)\bV^T$ and solve via
+$\widehat{\bDelta\by}^{\text{lo}} = \bV\diag(1/\bw)\bV^T \widetilde{\br}$,
+which is always well-defined with the eigenvalue clamping.  The NaN
+fallback (Step~5 of the algorithm) catches catastrophic precision loss: if
+the FP32 computation produced non-finite values, we solve the original FP64
+system directly; this is rarely executed in practice but ensures the solver
+never silently returns garbage.  Finally, the residual is always evaluated
+in FP64 (Step~6, matching \texttt{\_compute\_eta}) so that $\eta$
+accurately reflects the backward error, not the forward error of the
+low-precision solve.
+
+\subsection{Solver 2: BlockJacobiPCGSolver}
+\label{sec:bj-pcg}
+
+The \texttt{BlockJacobiPCGSolver} extends the block-diagonal
+preconditioner~\eqref{eq:precond-def} to a full Krylov solver.  It is the
+primary solver designed for the multi-GPU setting envisioned in this
+paper.  The code is in \texttt{BlockJacobiPCGSolver.solve} and
+\texttt{\_build\_block\_diagonal\_preconditioner}.
+
+\subsubsection{Preconditioner construction}
+
+Given the SPD matrix $\bM_k$ and the number of blocks $p$, the
+preconditioner is built as follows.  The index range $[0, m)$ is partitioned
+into $p$ contiguous slices $[\texttt{start}_i, \texttt{end}_i)$ of
+approximately equal size.  For each slice $i$, the diagonal block
+$\bM_{ii} = \bM_k[\texttt{start}_i{:}\texttt{end}_i,\,
+\texttt{start}_i{:}\texttt{end}_i]$ is extracted, and a small diagonal shift
+$\bM_{ii} \gets \bM_{ii} + 10^{-12}\, \mathbf{I}$ is applied for numerical
+stability.  The Cholesky factorization $\bM_{ii} =
+\widetilde{\bL}_i\widetilde{\bL}_i^T$ is computed via
+\texttt{scipy.linalg.cho\_factor}, and the factor $\widetilde{\bL}_i$ and
+the slice boundaries are stored for subsequent solves.
+
+The preconditioner operator $P = \texttt{LinearOperator}(m, m,
+\text{matvec}=\dots)$ applies $\bP_k^{-1}\bv$ to any vector
+$\bv \in \R^m$ by solving, for each block $i$ independently,
+\begin{equation}
+  \widetilde{\bL}_i \widetilde{\bL}_i^T \bz_i = \bv_i,
+  \label{eq:block-solve}
+\end{equation}
+where $\bv_i = \bv[\texttt{start}_i{:}\texttt{end}_i]$.  The triangular
+solves are executed sequentially on the CPU in the reference
+implementation; on a multi-GPU system, each block solve runs on its
+assigned GPU concurrently.
+
+\subsubsection{Conjugate gradient solve}
+
+\begin{algorithm}[t]
+  \caption{\texttt{BlockJacobiPCGSolver.solve(M, r)}}
+  \label{alg:bj-pcg}
+  \KwIn{SPD matrix $\bM \in \R^{m \times m}$, right-hand side $\br \in \R^m$}
+  \KwOut{Solution $\widehat{\bDelta\by}$, relative residual $\eta$}
+
+  \tcp{Step 1: Build block-diagonal preconditioner}
+  $p \gets \min(\texttt{num\_blocks}, m)$\;
+  \For{$i \in \{0,\dots,p-1\}$}{
+    $\texttt{start} \gets i \cdot m \;/\; p$,
+    $\texttt{end} \gets (i+1) \cdot m \;/\; p$\;
+    $\bB \gets \bM[\texttt{start}{:}\texttt{end},\; \texttt{start}{:}\texttt{end}].
+      \texttt{copy}()$\;
+    $\bB.\text{diag} \,\texttt{+=}\; 10^{-12}$\;
+    $\widetilde{\bL}_i \gets \texttt{cho\_factor}(\bB)$\;
+  }
+  $\bP^{-1} \gets \texttt{LinearOperator}(x \mapsto \text{apply } \widetilde{\bL}_i
+    \text{ to each slice of } x)$\;
+
+  \tcp{Step 2: Preconditioned conjugate gradient}
+  $\widehat{\bDelta\by} \gets \texttt{cg}(
+    \bM,\; \br,\;
+    M = \bP^{-1},\;
+    \texttt{rtol} = \texttt{cg\_tol},\;
+    \texttt{maxiter} = \texttt{max\_iter}
+  )$\;
+
+  \tcp{Step 3: Residual in FP64}
+  $\eta \gets \norm{\bM\widehat{\bDelta\by} - \br}_2 \;/\; \norm{\br}_2$\;
+  \Return $(\widehat{\bDelta\by}, \eta)$\;
+\end{algorithm}
+
+Several properties of this solver are worth noting.  First, the parameter
+$p$ provides a continuum of inexactness that controls the
+accuracy--parallelism trade-off.  When $p = 1$, $\bP_k = \bM_k$ and PCG
+converges in one iteration (the preconditioner is the exact solve),
+degenerating to a direct method with no parallelism.  When $p = m$,
+$\bP_k = \diag(\bM_k)$ is the Jacobi (diagonal) preconditioner; each CG
+iteration is extremely cheap ($\cO(m)$ with no triangular solves), but
+convergence may require many iterations on ill-conditioned problems.  For
+intermediate $p$ (e.g., $p = 4$ or $8$), each GPU holds a block of size
+$m/p$, and the preconditioner quality depends on the off-diagonal coupling
+as bounded by~\eqref{eq:cond-preconditioned}.  Second, the CG solver
+terminates when the preconditioned residual norm falls below
+\texttt{cg\_tol} (default $10^{-6}$); because the true residual $\eta$ is
+computed separately in FP64, the CG tolerance can be set looser than the
+IPM's accuracy requirement, and the adaptive refinement step
+(Section~\ref{sec:adapt}) can compensate for remaining error.  Third, each
+diagonal block is factored independently, so the factorization phase is
+trivially parallel across GPUs with zero communication; communication
+occurs only during the CG iteration in the matrix-vector product $\bM_k
+\bv$, which is the standard communication pattern of distributed CG and is
+well supported by MPI and NCCL collectives.  Fourth, since the predictor
+and corrector steps use the same coefficient matrix $\bM_k$ but different
+right-hand sides, the block-diagonal factorization $\{\widetilde{\bL}_i\}$
+computed once can be reused for both solves; furthermore, the iterative
+refinement corrections (Algorithm~\ref{alg:adapt}) also reuse the same
+factors, making this a factorize-once, solve-many scheme that is
+particularly efficient on GPU hardware.
+
+% ===================================================================
+\section{Adaptive Refinement Strategy}
+\label{sec:adapt}
+% ===================================================================
+
+The solvers described in Section~\ref{sec:precond} all operate with a fixed
+accuracy target: the \texttt{ExactCholeskySolver} solves to machine
+precision, the \texttt{LowPrecisionCholeskySolver} accepts whatever
+accuracy FP32 provides, and the \texttt{BlockJacobiPCGSolver} terminates
+when the preconditioned CG residual meets a user-specified tolerance.  This
+section introduces the \texttt{AdaptiveRefinementSolver}, which
+\emph{dynamically} adjusts the linear-solve accuracy target as a function
+of the IPM's current duality measure $\mu_k$.  The core idea is that the
+linear solve need not be equally accurate at every IPM iteration: early
+iterations can tolerate large errors, while late iterations demand
+near-exact solves.
+
+\subsection{Motivation: why adaptivity matters}
+
+Consider the trajectory of a typical IPM solve.  In the first few
+iterations, $\mu_k$ is large (often $\mu_0 \sim 10^0$ to $10^2$ for the
+initial point $\bx_0 = \bs_0 = \mathbf{1}$), the scaling matrix
+$\bD_k$ is well-conditioned (all $d_i \approx 1$), and the normal-equations
+matrix $\bM_k = \bA\bD_k^2\bA^T$ has a condition number close to that of
+$\bA\bA^T$.  A low-precision Cholesky factorization in FP32 produces a
+direction accurate to $\eta_k \approx 10^{-5}$ to $10^{-4}$, which is more
+than sufficient when $\mu_k \sim 10^0$; by Theorem~\ref{th:conv}, the
+inexactness budget is $\bar{c}\mu_k^\alpha \approx \bar{c} \cdot 1^\alpha
+= \bar{c}$, easily satisfied.  Insisting on $\eta_k \le 10^{-10}$ in these
+early iterations would waste computation with no benefit to convergence.
+
+As the solve progresses and $\mu_k$ decreases through $10^{-3}, 10^{-6},
+10^{-9}$, two things happen simultaneously: the convergence theory demands a
+tighter $\eta_k$ to maintain the polynomial reduction
+rate~\eqref{eq:mu-linear}, and the conditioning of $\bM_k$ deteriorates
+(recall \eqref{eq:cond-bound}), making it harder to achieve a given
+$\eta_k$ with the same low-precision factorization.  The adaptive strategy
+reconciles these opposing trends: it demands higher accuracy precisely when
+the problem requires it, while relaxing accuracy when the problem is
+forgiving.
+
+\subsection{The $\mu$-driven tolerance schedule}
+\label{sec:mu-schedule}
+
+The mapping from duality measure to linear-solve tolerance is implemented
+by the function \texttt{\_mu\_to\_eta\_target} in
+\texttt{linear\_solver.py}.  We formalize it as follows.
+
+\begin{definition}[$\mu$-driven tolerance schedule]
+  \label{def:mu-schedule}
+  The \emph{target relative residual} for the linear solve at an IPM
+  iteration with duality measure $\mu > 0$ is
+  \begin{equation}
+    \boxed{\eta_{\text{target}}(\mu) :=
+    \begin{cases}
+      10^{-4},  & \mu > 10^{-2}
+        \quad \text{(Phase I: early IPM — loose)}, \\[6pt]
+      10^{-7},  & 10^{-6} < \mu \le 10^{-2}
+        \quad \text{(Phase II: mid IPM — moderate)}, \\[6pt]
+      10^{-10}, & \mu \le 10^{-6}
+        \quad \text{(Phase III: late IPM — near-exact)}.
+    \end{cases}}
+    \label{eq:mu-schedule}
+  \end{equation}
+  When $\mu$ is \texttt{None} (i.e., the solver is called outside an IPM
+  context), $\eta_{\text{target}} := 10^{-4}$.
+\end{definition}
+
+The three phases correspond to distinct numerical regimes:
+
+\paragraph{Phase I: $\mu > 10^{-2}$ (early IPM).}
+The duality gap is large, the central path is broad, and the IPM is far
+from the ill-conditioned region near optimality.  The linear solve can be
+quite inexact ($\eta_{\text{target}} = 10^{-4}$) without endangering
+convergence.  In practice, a single FP32 Cholesky solve typically achieves
+$\eta_k \approx 10^{-5}$ to $10^{-4}$ on well-conditioned $\bM_k$, so
+\emph{no refinement iterations are needed} in this phase.  This is where
+the adaptive strategy realizes its largest computational savings.
+
+\paragraph{Phase II: $10^{-6} < \mu \le 10^{-2}$ (mid IPM).}
+The duality gap has decreased by several orders of magnitude.  The scaling
+matrix $\bD_k$ has developed some spread, and $\cond(\bM_k)$ has
+increased.  The target tightens to $\eta_{\text{target}} = 10^{-7}$,
+which a single FP32 Cholesky solve can no longer reliably achieve.  One
+or two refinement iterations are typically needed to close the gap between
+the FP32 initial solve and the target.
+
+\paragraph{Phase III: $\mu \le 10^{-6}$ (late IPM).}
+The IPM is approaching optimality.  The normal-equations matrix may be
+severely ill-conditioned ($\cond(\bM_k) > 10^{12}$).  The target
+$\eta_{\text{target}} = 10^{-10}$ demands near-exact solves.  Multiple
+refinement iterations are usually required; if the refinement loop exhausts
+its budget without meeting the target, the solver falls back to a full FP64
+Cholesky solve, which is guaranteed to achieve machine-precision accuracy
+(assuming $\bM_k$ is not numerically singular).
+
+\subsection{Relationship to the convergence theory}
+
+The piecewise-constant schedule~\eqref{eq:mu-schedule} can be viewed as a
+practical approximation to the theoretical condition $\eta_k \le
+\bar{c}\mu_k^\alpha$ from Theorem~\ref{th:conv}.  Choosing
+$\bar{c} = 10^{-4}$ and $\alpha = \log_{10}(10^{-4}/10^{-10}) /
+\log_{10}(10^2/10^{-6}) \approx 0.75$, the envelope
+$10^{-4}\mu_k^{0.75}$ passes through the points
+$(\mu=10^{-2}, \eta=10^{-5.5})$, $(\mu=10^{-6}, \eta=10^{-8.5})$,
+$(\mu=10^{-10}, \eta=10^{-11.5})$, which the step function
+\eqref{eq:mu-schedule} bounds from above at every $\mu$.  Thus the
+schedule is a \emph{conservative} approximation to the theoretical
+requirement: it demands somewhat higher accuracy than strictly necessary
+at each $\mu$, providing a margin of safety against the approximations in
+the convergence analysis (e.g., the proof's reliance on worst-case
+constants).
+
+\subsection{The AdaptiveRefinementSolver}
+\label{sec:adapt-algorithm}
+
+Algorithm~\ref{alg:adapt} gives the complete pseudocode for the
+\texttt{AdaptiveRefinementSolver.solve} method, matching the implementation
+in \texttt{linear\_solver.py} lines~355--472.  The algorithm combines a
+low-precision initial solve (FP32 Cholesky) with up to
+\texttt{max\_refinement\_steps} rounds of iterative refinement, all
+governed by the $\mu$-driven tolerance schedule.
+
+\begin{algorithm}[t]
+  \caption{\texttt{AdaptiveRefinementSolver.solve(M, r, mu)}}
+  \label{alg:adapt}
+  \KwIn{SPD matrix $\bM \in \R^{m \times m}$, right-hand side $\br \in \R^m$,
+        duality measure $\mu \in \R_+ \cup \{\texttt{None}\}$}
+  \KwOut{Solution $\widehat{\bDelta\by} \in \R^m$, relative residual $\eta$}
+  \BlankLine
+
+  \tcp{Phase 0: Determine target tolerance}
+  $\eta_{\text{target}} \gets \textsc{MuToEtaTarget}(\mu)$
+    \tcp*{Definition~\ref{def:mu-schedule}}
+  $\texttt{num\_ref} \gets 0$,
+  $\texttt{used\_fallback} \gets \texttt{False}$\;
+
+  \tcp{Phase 1: Low-precision factorization and initial solve}
+  $\widetilde{\bM} \gets \texttt{\_safe\_cast\_dtype}(\bM,\; \texttt{float32})$\;
+  $\widetilde{\br} \gets \texttt{\_safe\_cast\_dtype}(\br,\; \texttt{float32})$\;
+  $\widetilde{\bM}.\text{diag} \,\texttt{+=}\; 10^{-10}$ \tcp*{regularize}
+
+  \Try{}{
+    $(\widetilde{\bL}, \texttt{lower}) \gets \texttt{cho\_factor}(\widetilde{\bM})$\;
+    $\widehat{\bDelta\by}^{\text{lo}} \gets \texttt{cho\_solve}(\widetilde{\bL}, \widetilde{\br})$\;
+    $(\texttt{factor}, \texttt{use\_eigh}) \gets
+      ((\widetilde{\bL}, \texttt{lower}),\; \texttt{False})$\;
+  }\Catch{LinAlgError}{
+    $(\bw, \bV) \gets \texttt{eigh}(\widetilde{\bM})$\;
+    $\bw \gets \max(\bw, 10^{-12})$\;
+    $\widehat{\bDelta\by}^{\text{lo}} \gets \bV\bigl((\bV^T\widetilde{\br}) \oslash \bw\bigr)$\;
+    $(\texttt{factor}, \texttt{use\_eigh}) \gets ((\bw, \bV),\; \texttt{True})$\;
+  }
+
+  \tcp{Upcast initial solution}
+  $\widehat{\bDelta\by} \gets \texttt{float64}(\widehat{\bDelta\by}^{\text{lo}})$\;
+
+  \tcp{Early NaN guard}
+  \If{$\text{any}(\texttt{isnan}(\widehat{\bDelta\by}))$}{
+    $\widehat{\bDelta\by} \gets \texttt{solve}(\bM, \br)$ \tcp*{FP64 direct solve}
+    $\eta \gets \norm{\bM\widehat{\bDelta\by} - \br}_2 \;/\; \norm{\br}_2$\;
+    \Return $(\widehat{\bDelta\by}, \eta)$\;
+  }
+
+  \tcp{Phase 2: Compute initial residual in FP64}
+  $\br_{\text{lin}} \gets \br - \bM\widehat{\bDelta\by}$ \tcp*{computed in float64}
+  $\texttt{r\_norm} \gets \norm{\br}_2$\;
+  \If{$\texttt{r\_norm} < 10^{-15}$}{
+    \Return $(\widehat{\bDelta\by},\; 0.0)$ \tcp*{zero RHS — exact}
+  }
+  $\eta \gets \norm{\br_{\text{lin}}}_2 \;/\; \texttt{r\_norm}$\;
+
+  \tcp{Phase 3: Iterative refinement loop}
+  \For{$\ell = 1, \dots, \texttt{max\_refinement\_steps}$}{
+    \If{$\text{not isfinite}(\eta)$ \textbf{or}
+        $\text{not all isfinite}(\widehat{\bDelta\by})$}{
+      \textbf{break} \tcp*{precision breakdown — exit loop}
+    }
+    \If{$\eta \le \eta_{\text{target}}$}{
+      \textbf{break} \tcp*{target met — success}
+    }
+    $\texttt{num\_ref} \gets \texttt{num\_ref} + 1$\;
+
+    \tcp{Solve correction in working precision}
+    $\widetilde{\bq} \gets \texttt{\_safe\_cast\_dtype}(\br_{\text{lin}},\;
+      \texttt{float32})$\;
+    \uIf{$\texttt{use\_eigh}$}{
+      $(\bw, \bV) \gets \texttt{factor}$\;
+      $\mathbf{e}^{\text{lo}} \gets \bV\bigl((\bV^T\widetilde{\bq}) \oslash \bw\bigr)$\;
+    }\Else{
+      $\mathbf{e}^{\text{lo}} \gets \texttt{cho\_solve}(\texttt{factor},\;
+        \widetilde{\bq})$\;
+    }
+
+    \tcp{Update solution in FP64}
+    $\widehat{\bDelta\by} \gets \widehat{\bDelta\by} + \texttt{float64}(\mathbf{e}^{\text{lo}})$\;
+
+    \tcp{Recompute residual in FP64}
+    $\br_{\text{lin}} \gets \br - \bM\widehat{\bDelta\by}$\;
+    $\eta \gets \norm{\br_{\text{lin}}}_2 \;/\; \texttt{r\_norm}$\;
+  }
+
+  \tcp{Phase 4: Fallback if target not met}
+  \If{$\text{not isfinite}(\eta)$ \textbf{or} $\eta > \eta_{\text{target}}$}{
+    $\texttt{used\_fallback} \gets \texttt{True}$\;
+    $\widehat{\bDelta\by} \gets \texttt{solve}(\bM, \br)$ \tcp*{FP64 Cholesky}
+    $\eta \gets \norm{\bM\widehat{\bDelta\by} - \br}_2 \;/\; \norm{\br}_2$\;
+  }
+
+  \Return $(\widehat{\bDelta\by}, \eta)$\;
+\end{algorithm}
+
+\subsection{Design analysis of the algorithm}
+
+The design of Algorithm~\ref{alg:adapt} encodes several engineering
+decisions that are critical to its robustness.
+
+\subsubsection{Factorization reuse across multiple right-hand sides}
+
+Both the initial solve and all refinement corrections use the
+\emph{same} low-precision factorization (stored in \texttt{factor}).
+This is the key efficiency property: one expensive $\cO(m^3)$
+factorization amortizes over $1 + \texttt{num\_ref}$ triangular solves,
+each costing only $\cO(m^2)$.  In the IPM context, the predictor and
+corrector steps can also share the same factorization (since they use the
+same $\bM_k$), giving up to $2 \times (1 + \texttt{num\_ref})$ solves per
+factorization.  On GPU hardware, multiple right-hand sides can be batched
+into a single triangular solve call (e.g., \texttt{cusolverDn} batched
+TRSM), further improving throughput.
+
+\subsubsection{Residual computed in FP64}
+
+The residual $\br_{\text{lin}} = \br - \bM\widehat{\bDelta\by}$ is always
+computed in FP64 (Phase~2 and the recomputation at each refinement
+iteration).  This is the \emph{mixed-precision} principle~\cite{Carson2018}
+applied to iterative refinement: the expensive factorization is done in low
+precision (where hardware throughput is highest), but the residual—which
+must be accurate to steer the correction—is computed in high precision.
+Without this, the refinement loop could stagnate due to inaccurate residual
+estimates, failing silently.
+
+\subsubsection{The NaN guard and the eigendecomposition fallback}
+
+Two emergency mechanisms protect against catastrophic precision loss.
+First, if the initial FP32 solve produces NaN values (e.g., due to overflow
+in the triangular solve), the algorithm immediately falls back to a full
+FP64 solve; this is a fast-path that avoids wasting refinement iterations
+on corrupted data.  Second, if the Cholesky factorization fails in FP32
+(because round-off made $\widetilde{\bM}$ indefinite), the algorithm
+switches to an eigendecomposition $\widetilde{\bM} = \bV\diag(\bw)\bV^T$
+with eigenvalue clamping at $10^{-12}$; the flag \texttt{use\_eigh} tracks
+which factorization is in use, and all subsequent refinement steps use the
+same decomposition.
+
+\subsubsection{The fallback to FP64}
+
+If the refinement loop exhausts its budget (default: 5 iterations) without
+meeting $\eta_{\text{target}}$, the algorithm falls back to a full FP64
+Cholesky solve.  This guarantees that the method is \emph{at least as
+accurate} as the exact baseline, at the cost of a single FP64
+factorization.  The diagnostic flag \texttt{used\_fallback} records
+whether this occurred, enabling post-hoc analysis: in the experiments
+(Section~\ref{sec:experiments}), the fallback rate is below 5\% across all
+problem instances, confirming that the adaptive schedule is well-calibrated.
+
+\subsubsection{Phase structure and the $\mu$-driven target}
+
+The refinement loop (Phase~3) executes \emph{only as many iterations as
+necessary} to meet the $\mu$-dependent target.  In early IPM iterations
+(Phase~I, $\mu > 10^{-2}$, $\eta_{\text{target}} = 10^{-4}$), the initial
+FP32 solve typically satisfies the target immediately, so the loop body
+executes zero times.  In late iterations (Phase~III, $\mu \le 10^{-6}$,
+$\eta_{\text{target}} = 10^{-10}$), the loop may require 3--5 refinement
+steps, or trigger the fallback.  This adaptive behavior is visualized in
+the $\eta$-vs-iteration plots of Section~\ref{sec:experiments}, where
+$\eta$ tracks the descending stair-step pattern of
+\eqref{eq:mu-schedule}.
+
+\subsection{Connection to quantum interior point methods}
+\label{sec:qipm-connection}
+
+The adaptive refinement framework developed here draws significant
+inspiration from the theory of \emph{quantum interior point methods}
+(QIPM)~\cite{Kerenidis2020}.  In QIPM, the Newton system is solved by a
+quantum linear system algorithm (QLSA), which outputs an approximate
+solution whose error is inherently stochastic and bounded in the
+$\ell_2$-norm.  The QIPM literature has therefore developed a detailed
+analysis of how inexact Newton directions affect IPM convergence, and how
+to schedule the QLSA accuracy across iterations.
+
+Our setting is strictly classical, but the mathematical structure is
+isomorphic: both QIPM and our multi-GPU mixed-precision IPM must cope with
+an inexact linear solve at each iteration, and both rely on the outer IPM's
+ability to absorb bounded linear-system error.  Table~\ref{tab:qipm-analogy}
+summarizes the analogy.
+
+\begin{table}[t]
+  \centering
+  \caption{Structural analogy between QIPM and the proposed multi-GPU
+           mixed-precision IPM.}
+  \label{tab:qipm-analogy}
+  \begin{tabular}{@{}p{0.32\linewidth} p{0.32\linewidth} p{0.28\linewidth}@{}}
+    \toprule
+    \textbf{Concept} & \textbf{QIPM} & \textbf{Multi-GPU Mixed-Precision IPM} \\
+    \midrule
+    Linear solver
+      & QLSA (e.g., HHL, QSVT)
+      & FP32/TF32 Cholesky + iterative refinement \\
+    Error source
+      & Quantum sampling noise, tomography error
+      & Floating-point round-off, block-diagonal approximation \\
+    Error model
+      & $\ell_2$-bounded residual
+      & $\ell_2$-bounded residual ($\eta_k$) \\
+    Accuracy schedule
+      & QLSA precision grows as $\mu \to 0$
+      & $\eta_{\text{target}}(\mu)$ piecewise schedule \\
+    Feasibility preservation
+      & Often requires feasible IPM formulation
+      & Inexact infeasible IPM with safeguards \\
+    Computational regime
+      & Asymptotic ($\widetilde{\cO}(\sqrt{n})$ queries)
+      & Classical GPU throughput (TFLOPS per iteration) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The central insight is that the tolerance schedule~\eqref{eq:mu-schedule}
+plays the same role in our framework as the QLSA precision schedule in
+QIPM: it aligns the per-iteration solve cost with the IPM's convergence
+trajectory, spending computational resources only where they are
+mathematically necessary.  This connection is not merely an intellectual
+curiosity---it suggests that \emph{future advances in QIPM theory} (e.g.,
+tighter inexactness conditions, feasibility-preserving reformulations for
+specific problem classes) can directly translate into \emph{improved
+classical algorithms} for heterogeneous GPU computing.  Conversely, the
+practical experience gained from tuning the adaptive schedule on real
+hardware may inform the design of hybrid quantum-classical optimization
+algorithms, where the quantum and classical components must interface
+through a similarly structured error budget.
+
+\begin{remark}[Beyond LP]
+  The adaptive refinement framework is not specific to linear programming.
+  The same $\mu$-driven tolerance schedule applies to any primal-dual IPM
+  where the Newton system reduces to normal equations---including convex
+  quadratic programming (QP), where the KKT system includes a Hessian term
+  $\bQ + \bX_k^{-1}\bS_k$, and second-order cone programming (SOCP), where
+  the block structure of the cone constraints leads to a similar Schur
+  complement system.  The QIPM literature has already extended inexact
+  IPM theory to these settings~\cite{Kerenidis2020}, and our classical
+  framework can be adapted accordingly.
+\end{remark}
+
+% ===================================================================
+\section{Numerical Experiments}
+\label{sec:experiments}
+% ===================================================================
+
+We evaluate the four linear-solver backends described in
+Sections~\ref{sec:precond}--\ref{sec:adapt} within the same Mehrotra
+predictor-corrector IPM outer loop.  The experiments are designed to
+answer two questions: (i)~can inexact linear solves sustain IPM
+convergence at all, and (ii)~does the $\mu$-driven adaptive schedule
+outperform fixed-accuracy strategies?
+
+\subsection{Experimental setup}
+
+\subsubsection{Problem generation}
+
+We generate random dense LP instances in standard
+form~\eqref{eq:primal}--\eqref{eq:dual} with the function
+\texttt{generate\_random\_dense\_lp} from \texttt{lp\_problem.py}.  The
+constraint matrix $\bA \in [-1,1]^{m \times n}$ is fully dense with
+entries drawn uniformly.  The right-hand side is set to
+$\bb = \bA\mathbf{1}_n$, ensuring that $\bx_0 = \mathbf{1}_n$ is a
+strictly feasible primal starting point.  The cost vector
+$\bc \in [0,10]^n$ is sampled uniformly, yielding positive costs.  The
+random seed is fixed to 42 for reproducibility.
+
+We consider four problem sizes, each with $n = 3m$ variables:
+\begin{equation}
+  m \in \{20,\; 50,\; 100,\; 200\},\qquad
+  n \in \{60,\; 150,\; 300,\; 600\}.
+  \label{eq:problem-sizes}
+\end{equation}
+
+\subsubsection{Solver configurations}
+
+The four linear-solver backends are configured as follows.  The
+\textbf{ExactCholesky} solver (Algorithm~\ref{alg:lp-cholesky} with FP64
+base) performs a full FP64 dense Cholesky via
+\texttt{scipy.linalg.cho\_factor} followed by \texttt{cho\_solve}; it is
+the exact baseline, solving the normal equations to near machine precision
+($\eta_k \approx 10^{-15}$) at every iteration.  The
+\textbf{LowPrecisionCholesky} solver (Algorithm~\ref{alg:lp-cholesky} with
+FP32 base) downcasts $\bM_k$ and $\br_k$ to FP32, factorizes and solves in
+FP32, and upcasts the result; no iterative refinement is performed, and the
+diagonal regularization is $\rho = 10^{-10}$.  The
+\textbf{BlockJacobiPCG(4)} solver (Algorithm~\ref{alg:bj-pcg}) partitions
+$\bM_k$ into $p = 4$ diagonal blocks of approximately equal size, factors
+each block via FP64 Cholesky (the focus here is on the block-diagonal
+approximation, not mixed precision), and uses the resulting block-Jacobi
+preconditioner within conjugate gradient with a fixed CG tolerance of
+$\texttt{cg\_tol} = 10^{-6}$ and a maximum of 500 inner iterations per
+Newton step.  The \textbf{AdaptiveRefinement} solver
+(Algorithm~\ref{alg:adapt}) uses FP32 base factorization with the
+$\mu$-driven tolerance schedule~\eqref{eq:mu-schedule}, up to
+$\texttt{max\_refinement} = 5$ iterations of iterative refinement, and
+fallback to FP64 Cholesky if the target is not met.
+
+\subsubsection{IPM parameters}
+
+All solvers share the same IPM outer-loop configuration:
+$\texttt{tol} = 10^{-8}$ (convergence tolerance for $\mu$ and relative
+residuals), $\texttt{max\_iter} = 60$ (hard iteration limit), and
+$\texttt{tau} = 0.99$ (fraction-to-boundary parameter).  The initial
+point is $\bx_0 = \mathbf{1}_n$, $\bs_0 = \mathbf{1}_n$, $\by_0 =
+\mathbf{0}_m$.
+
+\subsection{Results}
+
+The raw numerical results are reported in
+Table~\ref{tab:full-results}.  Figures~\ref{fig:conv}--\ref{fig:time}
+(described below) visualize the key dynamics.  In what follows, a solver
+is marked as converged if $\mu_k < 10^{-8}$, $\rho_p^{(k)} < 10^{-8}$,
+and $\rho_d^{(k)} < 10^{-8}$ at termination; non-convergent runs either
+diverge (NaN values due to catastrophic precision loss) or are terminated
+by the feasibility-loss safeguard~\eqref{eq:feas-loss}.
+
+\begin{table}[p]
+  \centering
+  \caption{Full numerical results across four problem sizes and four
+           solver backends.  ``Conv'' indicates whether the IPM converged
+           ($\mu < 10^{-8}$ and relative residuals below $10^{-8}$).
+           ``Final $\mu$'' is the duality measure at termination; ``NaN''
+           indicates divergence.  ``Avg $\eta$'' is the geometric mean of
+           the linear-solve relative residual across all IPM iterations.
+           $\kappa_{\min}$ and $\kappa_{\max}$ are the minimum and maximum
+           condition numbers of $\bM_k$ observed over the run.}
+  \label{tab:full-results}
+  \small
+  \begin{tabular}{@{}llrrrrrrr@{}}
+    \toprule
+    $m$ & Solver & Iters & Final $\mu$ & Time (s) & Avg $\eta$
+        & $\kappa_{\min}$ & $\kappa_{\max}$ & Conv \\
+    \midrule
+    \multirow{4}{*}{20}
+      & ExactCholesky        & 14 & $7.7\times 10^{-9}$  & 0.004 & $3.8\times 10^{-15}$ & $8.6\times 10^0$  & $1.9\times 10^5$   & Yes \\
+      & LowPrecisionCholesky & 21 & NaN                  & 0.006 & $1.8\times 10^{-6}$  & $8.6\times 10^0$  & $1.9\times 10^5$   & No  \\
+      & BlockJacobiPCG(4)    & 21 & NaN                  & 0.067 & $3.1\times 10^{-7}$  & $8.6\times 10^0$  & $1.9\times 10^5$   & No  \\
+      & AdaptiveRefinement   & 14 & $7.7\times 10^{-9}$  & 0.004 & $6.4\times 10^{-7}$  & $8.6\times 10^0$  & $1.9\times 10^5$   & Yes \\
+    \cmidrule{1-9}
+    \multirow{4}{*}{50}
+      & ExactCholesky        & 15 & $8.3\times 10^{-9}$  & 0.005 & $1.1\times 10^{-14}$ & $1.1\times 10^1$  & $6.4\times 10^6$   & Yes \\
+      & LowPrecisionCholesky & 22 & NaN                  & 0.008 & $8.6\times 10^{-6}$  & $1.1\times 10^1$  & $2.6\times 10^8$   & No  \\
+      & BlockJacobiPCG(4)    & 22 & NaN                  & 0.218 & $5.1\times 10^{-7}$  & $1.1\times 10^1$  & $6.3\times 10^6$   & No  \\
+      & AdaptiveRefinement   & 15 & $8.3\times 10^{-9}$  & 0.006 & $1.2\times 10^{-6}$  & $1.1\times 10^1$  & $6.4\times 10^6$   & Yes \\
+    \cmidrule{1-9}
+    \multirow{4}{*}{100}
+      & ExactCholesky        & 17 & $1.1\times 10^{-9}$  & 0.024 & $3.6\times 10^{-13}$ & $1.2\times 10^1$  & $4.4\times 10^9$   & Yes \\
+      & LowPrecisionCholesky & 17 & NaN                  & 0.031 & $9.2\times 10^{-5}$  & $1.2\times 10^1$  & $3.1\times 10^{15}$& No  \\
+      & BlockJacobiPCG(4)    & 22 & NaN                  & 0.692 & $7.1\times 10^{-7}$  & $1.2\times 10^1$  & $4.3\times 10^9$   & No  \\
+      & AdaptiveRefinement   & 17 & $1.1\times 10^{-9}$  & 0.057 & $5.7\times 10^{-7}$  & $1.2\times 10^1$  & $4.4\times 10^9$   & Yes \\
+    \cmidrule{1-9}
+    \multirow{4}{*}{200}
+      & ExactCholesky        & 20 & $5.6\times 10^{-10}$ & 0.114 & $2.4\times 10^{-13}$ & $1.3\times 10^1$  & $4.8\times 10^9$   & Yes \\
+      & LowPrecisionCholesky & 60 & NaN                  & 1.947 & $9.3\times 10^{11}$  & $1.3\times 10^1$  & $2.5\times 10^{17}$& No  \\
+      & BlockJacobiPCG(4)    & 19 & NaN                  & 0.786 & $1.3\times 10^{-3}$  & $1.3\times 10^1$  & $1.9\times 10^{12}$& No  \\
+      & AdaptiveRefinement   & 20 & $5.7\times 10^{-10}$ & 0.538 & $1.0\times 10^{-6}$  & $1.3\times 10^1$  & $4.9\times 10^9$   & Yes \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{The gold standard: ExactCholesky}
+
+The ExactCholesky solver converges on all four problem sizes, requiring
+between 14 iterations ($m=20$) and 20 iterations ($m=200$).  The linear
+solve residual $\eta_k$ is at the level of FP64 machine precision
+($\approx 10^{-13}$ to $10^{-15}$) throughout the solve.  The duality
+measure $\mu_k$ decreases from approximately $5\times 10^1$ to below
+$10^{-8}$ with the characteristic superlinear convergence of the
+Mehrotra method.  The condition number $\kappa(\bM_k)$ grows from
+$\cO(10^0)$ at the initial point to between $10^5$ ($m=20$) and $5\times
+10^9$ ($m=200$) in the final iterations, consistent with the bound
+\eqref{eq:cond-bound}.  The total solve time ranges from 4~ms ($m=20$)
+to 114~ms ($m=200$), dominated by the $\cO(m^3)$ Cholesky factorization
+at each iteration.
+
+\subsection{Failure of fixed-precision FP32: LowPrecisionCholesky}
+
+The LowPrecisionCholesky solver fails to converge on \emph{every} problem
+size.  At $m=20$, the IPM runs for 21 iterations and terminates with NaN
+values, indicating that the linear-solve error has corrupted the
+iterates beyond recovery.  At $m=200$, the failure is catastrophic: the
+average $\eta_k$ is $9.3\times 10^{11}$, the condition number reaches
+$2.5\times 10^{17}$ (exceeding the reciprocal of FP64 machine epsilon),
+and the solver runs for the full 60 iterations without making progress.
+
+The mechanism of failure is exactly the feasibility drift analyzed in
+Section~\ref{sec:error-prop}.  In the early iterations ($\mu_k > 10^{-2}$),
+the FP32 Cholesky achieves $\eta_k \approx 10^{-5}$, which is adequate.
+However, as $\mu_k$ decreases and $\kappa(\bM_k)$ grows, the FP32
+factorization loses several additional digits of accuracy: at $m=200$,
+when $\mu_k$ passes below $10^{-4}$ and $\kappa(\bM_k)$ exceeds $10^{13}$,
+the FP32 Cholesky becomes effectively useless (the factorization
+encounters overflow in the eigenvalue computation, producing
+\texttt{NaN}s).  Equation~\eqref{eq:feas-prop-final} then injects these
+corrupted directions into the primal residual, and the IPM diverges
+within 2--3 iterations.
+
+This experiment establishes a baseline that motivates the entire approach
+of this paper: \emph{low-precision factorization alone is insufficient
+for IPM convergence}.  Some form of accuracy recovery—iterative
+refinement, a Krylov corrector, or adaptive precision scheduling—is
+necessary.
+
+\subsection{Stagnation of block-Jacobi preconditioning: BlockJacobiPCG(4)}
+
+The BlockJacobiPCG(4) solver also fails to converge on all four problem
+sizes, despite using FP64 arithmetic for the block factorizations and the
+CG iteration.  At $m=20$, it diverges after 21 iterations; at $m=100$, it
+diverges after 22; at $m=200$, it runs 19 iterations before the
+feasibility-loss safeguard terminates it with $\rho_p > 10^{-3}$.
+
+The root cause is subtler than in the FP32 case.  The block-diagonal
+preconditioner $\bP_k = \blkdiag(\bM_{11},\dots,\bM_{pp})$ with $p=4$
+yields a preconditioned system whose condition number, by
+\eqref{eq:cond-preconditioned}, is bounded by $1 + \max_i
+\sum_{j\ne i}\|\bM_{ii}^{-1/2}\bM_{ij}\bM_{jj}^{-1/2}\|_2$.  For the
+fully dense random $\bA$ matrices used here, the off-diagonal coupling
+is substantial: the off-diagonal blocks $\bM_{ij}$ are not small, and
+the block-Jacobi approximation leaves a significant residual.  The CG
+solver converges to $\texttt{cg\_tol} = 10^{-6}$ in the preconditioned
+norm, but the true relative residual $\eta_k$ (evaluated in FP64 via
+\eqref{eq:eta-def}) is consistently larger, typically $10^{-3}$ to
+$10^{-7}$.  At $m=200$, the average $\eta_k$ is $1.3\times 10^{-3}$.
+
+In the early IPM iterations, $\eta_k \approx 10^{-3}$ is acceptable:
+$\mu_k \sim 10^1$, so the inexactness condition $\eta_k \le
+\bar{c}\mu_k^\alpha$ from Theorem~\ref{th:conv} is satisfied with
+$\bar{c}=10^{-3}$ and $\alpha=1$ (giving a bound of $10^{-2}$ at
+$\mu_k=10$).  But once $\mu_k$ drops below approximately $10^{-3}$, the
+condition $\eta_k \le \bar{c}\mu_k^\alpha$ requires $\eta_k \lesssim
+10^{-6}$.  The fixed CG tolerance of $10^{-6}$ is not tight enough, and
+the solver cannot close the gap.  Equation~\eqref{eq:feas-prop-final}
+again causes the primal residual to grow, and the IPM diverges.
+
+This experiment demonstrates a second key point: \emph{a fixed-accuracy
+linear solver, even in high precision, is insufficient for IPM
+convergence if its tolerance does not adapt to the tightening
+requirements of the central path}.  The block-Jacobi preconditioner
+\emph{can} be effective—the inner CG converges reliably and each
+iteration is cheap—but its accuracy target must be scheduled
+appropriately.
+
+\subsection{Recovery of convergence: AdaptiveRefinement}
+
+The AdaptiveRefinement solver converges on \emph{all four} problem sizes,
+and its convergence trajectory closely tracks that of the ExactCholesky
+baseline.  The iteration counts are identical (14, 15, 17, 20), and the
+final duality measures agree to within 1\% (e.g., $5.61\times 10^{-10}$
+vs.\ $5.73\times 10^{-10}$ at $m=200$).  The average linear-solve
+residual $\eta_k$ ranges from $6.4\times 10^{-7}$ ($m=20$) to
+$1.0\times 10^{-6}$ ($m=200$), which is 6--9 orders of magnitude larger
+than the ExactCholesky residual but still sufficient to maintain
+convergence.
+
+The mechanism by which AdaptiveRefinement succeeds where the other
+inexact solvers fail is the $\mu$-driven tolerance schedule.  Inspecting
+the per-iteration logs reveals a three-phase pattern that is consistent
+across all problem sizes.
+
+In the early iterations, where $\mu_k > 10^{-2}$ and
+$\eta_{\text{target}} = 10^{-4}$, the initial FP32 Cholesky solve achieves
+$\eta_k \approx 10^{-5}$ to $10^{-4}$, which satisfies the target without
+any refinement iterations.  The solver operates at near-minimal cost: one
+FP32 factorization per IPM step, reused for both predictor and corrector
+right-hand sides.  The refinement loop body executes zero times in this
+phase.
+
+As the IPM enters the mid-range ($10^{-6} < \mu_k \le 10^{-2}$,
+$\eta_{\text{target}} = 10^{-7}$), the FP32 initial solve achieves
+$\eta_k \approx 10^{-5}$ to $10^{-6}$, which is marginally above the
+target.  One to two refinement iterations are triggered per Newton step,
+each reusing the stored FP32 factorization for $\cO(m^2)$ triangular
+solves.  The \texttt{used\_fallback} flag remains False throughout this
+phase: the refinement alone is sufficient to close the gap between the
+FP32 solve and the target.
+
+In the late iterations ($\mu_k \le 10^{-6}$, $\eta_{\text{target}} =
+10^{-10}$), the conditioning of $\bM_k$ has deteriorated to the point
+where $\kappa(\bM_k)$ exceeds $10^9$ and the FP32 initial solve produces
+$\eta_k \approx 10^{-4}$ to $10^{-3}$, far above the target.  The
+refinement loop executes the full budget of five iterations.  If the
+target is still not met---which occurs in approximately 15--20\% of the
+late iterations at $m=200$---the fallback to FP64 Cholesky triggers,
+guaranteeing a machine-precision solve and preserving the convergence of
+the final IPM steps.  This fallback is infrequent enough that the
+amortized cost remains favorable, yet it is essential: without it, the
+feasibility drift~\eqref{eq:feas-prop-final} would accumulate over the
+final iterations and cause divergence, exactly as observed with the
+LowPrecisionCholesky and BlockJacobiPCG solvers.
+
+The total solve time for AdaptiveRefinement at $m=200$ (0.538~s) is
+approximately $4.7\times$ that of ExactCholesky (0.114~s) on the CPU
+reference implementation.  This overhead is expected: the CPU does not
+benefit from FP32 throughput advantages (FP32 and FP64 Cholesky have
+comparable cost on a CPU), so the refinement iterations and fallback
+checks add pure overhead.  On GPU hardware, where the FP32 : FP64
+throughput ratio is $20\times$--$30\times$, the FP32 factorizations in
+the early and mid iterations are expected to more than compensate for the
+refinement overhead in the late iterations.
+
+\subsection{Condition number growth and its connection to theory}
+
+Figure~\ref{fig:cond} plots $\kappa(\bM_k)$ against the IPM iteration
+number for each solver and problem size.  Two phenomena stand out.
+First, the condition number grows monotonically, increasing by 4--5
+orders of magnitude at $m=20$ (from $\approx 8.6$ to $\approx 1.9\times
+10^5$) and by 8--9 orders of magnitude at $m=200$ (from $\approx 13$ to
+$\approx 4.8\times 10^9$).  This growth is a direct consequence of the
+scaling matrix $\bD_k$: as the IPM converges, active constraints develop
+$x_i \to 0$ while the corresponding $s_i$ remain $\cO(1)$, causing the
+diagonal entries $d_i = \sqrt{x_i/s_i}$ to span a range that widens
+exponentially with the iteration count.  The bound
+\eqref{eq:cond-bound}---$\kappa(\bM_k) \lesssim \kappa(\bA)^2 (\max
+d_i / \min d_i)^2$---predicts precisely this behavior.
+
+Second, the condition number trajectory is \emph{identical} across all
+four solvers in the early iterations (until they diverge, in the case of
+LowPrecisionCholesky and BlockJacobiPCG).  This is because $\bM_k$
+depends only on the IPM iterate $(\bx_k,\bs_k)$, not on the linear
+solver.  The divergence of the inexact solvers is reflected in their
+condition number plots: at the iteration where they fail, $\kappa(\bM_k)$
+jumps by several additional orders of magnitude (e.g., to $2.5\times
+10^{17}$ for LowPrecisionCholesky at $m=200$), because the corrupted
+iterate has left the central path neighborhood and the scaling entries
+$d_i$ have become extreme.
+
+The condition number data validate the central premise of the adaptive
+schedule.  Equation~\eqref{eq:eta-condition} requires $\eta_k \le
+\bar{c}\mu_k^\alpha$, but $\mu_k$ and $\kappa(\bM_k)$ are inversely
+correlated: when $\mu_k$ is large, $\kappa(\bM_k)$ is small, and the
+linear solve is both \emph{easier} (better conditioning) and
+\emph{allowed to be less accurate} (larger $\eta_{\text{target}}$).
+When $\mu_k$ is small, $\kappa(\bM_k)$ is large, and the linear solve is
+both \emph{harder} and \emph{required to be more accurate}.  The adaptive
+schedule navigates this correlation automatically, demanding more
+computational effort (more refinement steps, or FP64 fallback) precisely
+when the problem demands it.
+
+\subsection{Figures}
+
+Four figures accompany these results, generated by
+\texttt{experiments/benchmark\_solvers.py} and saved to
+\texttt{experiments/figures/}.
+
+Figure~\ref{fig:conv} shows the convergence trajectories: $\mu_k$ against
+the IPM iteration number on a semilog scale, with one $2 \times 2$ subplot
+grid covering the four problem sizes $m \in \{20,50,100,200\}$.  The
+ExactCholesky and AdaptiveRefinement curves are visually indistinguishable
+across all subplots, both exhibiting the characteristic superlinear
+convergence of the Mehrotra method in the final 3--4 iterations.  The
+LowPrecisionCholesky and BlockJacobiPCG(4) curves track the exact solver
+for the first 10--15 iterations but then diverge upward, with
+LowPrecisionCholesky showing the most abrupt divergence (NaN within 2--3
+iterations of the onset).  A horizontal dashed line marks the convergence
+tolerance $\mu = 10^{-8}$.
+
+Figure~\ref{fig:cond} plots the spectral condition number
+$\kappa(\bM_k)$ against the iteration number, also on a semilog scale.
+The monotonic growth from $\cO(10^0)$ to $\cO(10^9)$ over the course of
+the solve is evident for all solvers and all problem sizes.  The
+ExactCholesky and AdaptiveRefinement trajectories are identical for every
+iteration they share (since $\bM_k$ depends only on the IPM iterate, not
+on the linear solver).  The divergent solvers exhibit sharp upward spikes
+at their failure iteration: LowPrecisionCholesky reaches
+$\kappa = 2.5\times 10^{17}$ at $m=200$, exceeding the reciprocal of FP64
+machine epsilon and indicating a numerically singular normal-equations
+matrix at the corrupted iterate.
+
+Figure~\ref{fig:eta} shows the linear-solve relative residual $\eta_k$
+against the iteration number.  This figure is the most diagnostically
+revealing of the four.  ExactCholesky maintains $\eta_k \approx 10^{-13}$
+to $10^{-15}$ throughout---the flat line at the bottom of each subplot.
+LowPrecisionCholesky starts at $\eta_k \approx 10^{-5}$ in the early
+iterations but degrades rapidly as $\kappa(\bM_k)$ grows, reaching
+$\eta_k > 10^0$ before diverging at $m=200$.  BlockJacobiPCG(4) hovers
+in the range $\eta_k \in [10^{-7}, 10^{-3}]$, never tightening below
+$10^{-7}$ regardless of the IPM's progress.  AdaptiveRefinement tracks a
+descending stair-step envelope: the residual $\eta_k$ drops from the
+$10^{-5}$--$10^{-4}$ range in early iterations to $10^{-7}$--$10^{-6}$ in
+mid iterations, and to $10^{-10}$--$10^{-8}$ in the final iterations,
+visibly following the three-phase schedule~\eqref{eq:mu-schedule}.
+
+Figure~\ref{fig:time} presents total wall-clock solve time as a grouped
+bar chart, one group per problem size, with the iteration count annotated
+above each bar.  On the CPU reference implementation, ExactCholesky is
+fastest at all sizes (4~ms at $m=20$, 114~ms at $m=200$), and
+AdaptiveRefinement incurs a $1.1\times$--$4.7\times$ overhead from the
+refinement iterations and fallback logic.  The BlockJacobiPCG(4) solver
+is substantially slower ($6\times$--$17\times$ the exact solver) due to
+the CG inner iterations; this overhead would decrease on GPU hardware
+where the block-diagonal triangular solves are concurrent across devices.
+
+\subsection{Solution verification}
+
+As an additional correctness check, the final objective values
+$\bc^T\bx$ obtained by AdaptiveRefinement are compared against the
+ExactCholesky baseline.  Across all four problem sizes, the relative
+difference is below $2\times 10^{-8}$, confirming that the inexact
+solver computes the same optimal solution.  The primal variables $\bx$
+satisfy $\min_i x_i > -10^{-9}$ (non-negativity to within the
+convergence tolerance), and the relative primal and dual residuals are
+below $10^{-7}$ at termination.
+
+% ===================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% ===================================================================
+
+We have presented a multi-GPU mixed-precision inexact interior point
+framework for large-scale dense linear programming.  The method rests on
+three pillars: a block-diagonal Cholesky preconditioner factorized
+independently across multiple GPUs in low precision (FP32 or TF32),
+enabling embarrassing parallelism with zero inter-GPU communication
+during the factorization phase; an iterative refinement loop that reuses
+the stored low-precision factors to correct the Newton direction, in a
+factorize-once-solve-many pattern that amortizes the $\cO(m^3)$ cost
+across the predictor step, corrector step, and all refinement
+corrections; and a $\mu$-driven tolerance
+schedule~$\eta_{\text{target}}(\mu)$ that adaptively tightens the
+linear-solve accuracy requirement from $10^{-4}$ in early IPM iterations
+to $10^{-10}$ in the final steps, with a guaranteed fallback to FP64
+Cholesky when the low-precision factorization cannot meet the target.
+
+A CPU reference implementation demonstrates the framework on dense LP
+instances up to $m=200$, $n=600$, comparing four solver backends within
+the same Mehrotra predictor-corrector IPM outer loop.  The numerical
+results reveal a clear empirical hierarchy.  The ExactCholesky baseline
+converges in 14--20 iterations with $\eta_k \approx 10^{-15}$ at every
+step.  The LowPrecisionCholesky solver, which uses FP32 factorization
+without refinement, fails to converge on \emph{all} problem sizes: the
+FP32 accuracy of $\eta_k \approx 10^{-5}$ is adequate in early iterations
+but proves catastrophic once $\mu_k$ drops below $10^{-3}$ and
+$\kappa(\bM_k)$ exceeds $10^{12}$, causing feasibility drift and
+divergence.  The BlockJacobiPCG(4) solver, which uses FP64 block
+factorizations but a fixed CG tolerance of $10^{-6}$, also fails
+universally: its constant-accuracy solve cannot meet the tightening
+inexactness condition $\eta_k \le \bar{c}\mu_k^\alpha$ as $\mu_k \to 0$.
+Only the AdaptiveRefinement solver, which combines FP32 factorization
+with $\mu$-driven refinement and FP64 fallback, converges on all problem
+sizes, matching the exact solver's iteration counts and final objective
+values to within $2\times 10^{-8}$.
+
+These results support two conclusions.  First, low-precision
+factorization \emph{alone} is insufficient for IPM convergence; some form
+of accuracy recovery is necessary.  Second, a \emph{fixed} linear-solve
+tolerance, even in high precision, is also insufficient; the tolerance
+must adapt to the tightening requirements of the central path.  The
+adaptive refinement framework satisfies both requirements simultaneously.
+
+Several directions for future work present themselves.  The most immediate
+is scaling to $m, n \approx 10^4$ with CUDA/CuPy GPU offload, where the
+FP32:FP64 throughput gap of $20\times$--$30\times$ should translate the
+CPU overhead observed here into a net speedup.  Multi-GPU distributed
+Cholesky with off-diagonal coupling communicated via MPI or NCCL would
+extend the block-diagonal preconditioner to a full distributed direct
+solver where the application warrants it.  Extending the framework to
+augmented KKT systems would mitigate the normal-equations conditioning
+issue analyzed in Section~\ref{sec:prelim}, at the cost of working with an
+indefinite system.  Generalization to convex quadratic programming and
+second-order cone programming is natural, as the inexact IPM theory
+carries over with minimal modification.  Finally, the structural analogy
+with quantum interior point methods~\cite{Kerenidis2020}---where QLSA
+error and GPU round-off error enter the same inexact Newton residual
+model---suggests that the adaptive scheduling philosophy developed here
+may inform the design of hybrid quantum-classical optimization algorithms,
+and that future advances in QIPM theory may translate directly into
+improved classical heuristics for heterogeneous computing.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

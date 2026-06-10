@@ -1,0 +1,50 @@
+\begin{thebibliography}{1}
+
+\bibitem{Bellavia1998}
+Stefania Bellavia.
+\newblock An inexact interior point method.
+\newblock {\em Journal of Optimization Theory and Applications},
+  96(1):109--121, 1998.
+
+\bibitem{Carson2018}
+Erin Carson and Nicholas~J. Higham.
+\newblock Accelerating the solution of linear systems by iterative refinement
+  in three precisions.
+\newblock {\em {SIAM} Journal on Scientific Computing}, 40(2):A817--A847, 2018.
+
+\bibitem{Kerenidis2020}
+Iordanis Kerenidis and Anupam Prakash.
+\newblock A quantum interior point method for {LP}s and {SDP}s.
+\newblock {\em {ACM} Transactions on Quantum Computing}, 1(1):1--32, 2020.
+
+\bibitem{Mehrotra1992}
+Sanjay Mehrotra.
+\newblock On the implementation of a primal-dual interior point method.
+\newblock {\em {SIAM} Journal on Optimization}, 2(4):575--601, 1992.
+
+\bibitem{Monteiro2003}
+Renato D.~C. Monteiro and Jerome~W. O'Neal.
+\newblock Convergence of the inexact {M}ehrotra predictor-corrector
+  interior-point method.
+\newblock Technical report, Georgia Institute of Technology, 2003.
+\newblock ISyE Technical Report.
+
+\bibitem{Nesterov1994}
+Yurii Nesterov and Arkadii Nemirovskii.
+\newblock {\em Interior-Point Polynomial Algorithms in Convex Programming}.
+\newblock Society for Industrial and Applied Mathematics, Philadelphia, PA,
+  1994.
+
+\bibitem{NVIDIA2023}
+{NVIDIA Corporation}.
+\newblock {NVIDIA H100 Tensor Core GPU Architecture}.
+\newblock Whitepaper, 2023.
+\newblock Available at \url{https://resources.nvidia.com/}.
+
+\bibitem{Wright1997}
+Stephen~J. Wright.
+\newblock {\em Primal-Dual Interior-Point Methods}.
+\newblock Society for Industrial and Applied Mathematics, Philadelphia, PA,
+  1997.
+
+\end{thebibliography}

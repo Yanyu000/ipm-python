@@ -1,0 +1,139 @@
+% ---------------------------------------------------------------------------
+% References for "Multi-GPU Mixed-Precision Inexact Interior Point Methods
+% for Large-Scale Dense Linear Programming"
+% ---------------------------------------------------------------------------
+
+% --- Mehrotra 1992: predictor-corrector IPM ---
+@article{Mehrotra1992,
+  author    = {Sanjay Mehrotra},
+  title     = {On the Implementation of a Primal-Dual Interior Point Method},
+  journal   = {{SIAM} Journal on Optimization},
+  volume    = {2},
+  number    = {4},
+  pages     = {575--601},
+  year      = {1992},
+  doi       = {10.1137/0802028},
+}
+
+% --- Wright 1997: Primal-Dual Interior Point Methods (book) ---
+@book{Wright1997,
+  author    = {Stephen J. Wright},
+  title     = {Primal-Dual Interior-Point Methods},
+  publisher = {Society for Industrial and Applied Mathematics},
+  address   = {Philadelphia, PA},
+  year      = {1997},
+  doi       = {10.1137/1.9781611971453},
+}
+
+% --- Renegar 1988: polynomial-time LP via IPM ---
+@article{Renegar1988,
+  author    = {James Renegar},
+  title     = {A Polynomial-Time Algorithm, Based on {N}ewton's Method,
+               for Linear Programming},
+  journal   = {Mathematical Programming},
+  volume    = {40},
+  number    = {1},
+  pages     = {59--93},
+  year      = {1988},
+  doi       = {10.1007/BF01580724},
+}
+
+% --- Nesterov & Nemirovskii 1994: Interior Point Polynomial Algorithms
+%     in Convex Programming (book) ---
+@book{Nesterov1994,
+  author    = {Yurii Nesterov and Arkadii Nemirovskii},
+  title     = {Interior-Point Polynomial Algorithms in Convex Programming},
+  publisher = {Society for Industrial and Applied Mathematics},
+  address   = {Philadelphia, PA},
+  year      = {1994},
+  doi       = {10.1137/1.9781611970791},
+}
+
+% --- Bellavia 1998: inexact IPM ---
+@article{Bellavia1998,
+  author    = {Stefania Bellavia},
+  title     = {An Inexact Interior Point Method},
+  journal   = {Journal of Optimization Theory and Applications},
+  volume    = {96},
+  number    = {1},
+  pages     = {109--121},
+  year      = {1998},
+  doi       = {10.1023/A:1022664720717},
+}
+
+% --- Monteiro & O'Neal 2003: convergence of inexact IPM ---
+@techreport{Monteiro2003,
+  author    = {Renato D. C. Monteiro and Jerome W. O'Neal},
+  title     = {Convergence of the Inexact {M}ehrotra Predictor-Corrector
+               Interior-Point Method},
+  institution = {Georgia Institute of Technology},
+  year      = {2003},
+  note      = {ISyE Technical Report},
+}
+
+% --- Kerenidis & Prakash 2020: quantum IPM ---
+@article{Kerenidis2020,
+  author    = {Iordanis Kerenidis and Anupam Prakash},
+  title     = {A Quantum Interior Point Method for {LP}s and {SDP}s},
+  journal   = {{ACM} Transactions on Quantum Computing},
+  volume    = {1},
+  number    = {1},
+  pages     = {1--32},
+  year      = {2020},
+  doi       = {10.1145/3406306},
+}
+
+% --- Carson & Higham 2018: mixed-precision iterative refinement ---
+@article{Carson2018,
+  author    = {Erin Carson and Nicholas J. Higham},
+  title     = {Accelerating the Solution of Linear Systems by Iterative
+               Refinement in Three Precisions},
+  journal   = {{SIAM} Journal on Scientific Computing},
+  volume    = {40},
+  number    = {2},
+  pages     = {A817--A847},
+  year      = {2018},
+  doi       = {10.1137/17M1140819},
+}
+
+% --- NVIDIA GPU whitepaper (for FP64:FP32 throughput ratio reference) ---
+@misc{NVIDIA2023,
+  author    = {{NVIDIA Corporation}},
+  title     = {{NVIDIA H100 Tensor Core GPU Architecture}},
+  year      = {2023},
+  howpublished = {Whitepaper},
+  note      = {Available at \url{https://resources.nvidia.com/}},
+}
+
+% --- Additional references for future expansion ---
+
+@article{Gondzio2012,
+  author    = {Jacek Gondzio},
+  title     = {Interior Point Methods 25 Years Later},
+  journal   = {European Journal of Operational Research},
+  volume    = {218},
+  number    = {3},
+  pages     = {587--601},
+  year      = {2012},
+  doi       = {10.1016/j.ejor.2011.09.017},
+}
+
+@article{Hestenes1952,
+  author    = {Magnus R. Hestenes and Eduard Stiefel},
+  title     = {Methods of Conjugate Gradients for Solving Linear Systems},
+  journal   = {Journal of Research of the National Bureau of Standards},
+  volume    = {49},
+  number    = {6},
+  pages     = {409--436},
+  year      = {1952},
+  doi       = {10.6028/jres.049.044},
+}
+
+@book{Golub2013,
+  author    = {Gene H. Golub and Charles F. Van Loan},
+  title     = {Matrix Computations},
+  edition   = {4th},
+  publisher = {Johns Hopkins University Press},
+  address   = {Baltimore, MD},
+  year      = {2013},
+}
