@@ -6,12 +6,15 @@
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
 \usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\SetAlgoNlRelativeSize{-1}
 \usepackage{hyperref}
 \usepackage{graphicx}
 \usepackage{color}
 \usepackage{cite}
 \usepackage[margin=1in]{geometry}
 \usepackage{enumitem}
+\usepackage{multirow}
+\graphicspath{{../experiments/figures/}}
 
 % ---------------------------------------------------------------------------
 % Theorem environments
@@ -36,23 +39,40 @@
 \newcommand{\by}{\mathbf{y}}
 \newcommand{\bs}{\mathbf{s}}
 \newcommand{\bD}{\mathbf{D}}
+\newcommand{\be}{\mathbf{e}}
+\newcommand{\bI}{\mathbf{I}}
+\newcommand{\bL}{\mathbf{L}}
 \newcommand{\bM}{\mathbf{M}}
 \newcommand{\bP}{\mathbf{P}}
+\newcommand{\bQ}{\mathbf{Q}}
+\newcommand{\bS}{\mathbf{S}}
+\newcommand{\bV}{\mathbf{V}}
+\newcommand{\bX}{\mathbf{X}}
+\newcommand{\bB}{\mathbf{B}}
+\newcommand{\bq}{\mathbf{q}}
+\newcommand{\br}{\mathbf{r}}
+\newcommand{\bv}{\mathbf{v}}
+\newcommand{\bw}{\mathbf{w}}
+\newcommand{\bz}{\mathbf{z}}
 \newcommand{\bDelta}{\mathbf{\Delta}}
+\newcommand{\bLambda}{\mathbf{\Lambda}}
 \newcommand{\bmu}{\boldsymbol{\mu}}
+\newcommand{\cN}{\mathcal{N}}
 \newcommand{\cO}{\mathcal{O}}
 \newcommand{\norm}[1]{\left\lVert#1\right\rVert}
 \newcommand{\inner}[1]{\left\langle#1\right\rangle}
 \newcommand{\diag}{\operatorname{diag}}
 \newcommand{\cond}{\kappa}
 \newcommand{\blkdiag}{\operatorname{blkdiag}}
+\newcommand{\Try}[2]{\textbf{try}\;#2}
+\newcommand{\Catch}[2]{\textbf{catch} #1\;#2}
 
 % ---------------------------------------------------------------------------
 % Title
 % ---------------------------------------------------------------------------
 \title{
-  Multi-GPU Mixed-Precision Inexact Interior Point Methods \\
-  for Large-Scale Dense Linear Programming
+  Preliminary CPU Reference Study for GPU-Oriented \\
+  Inexact IPM Newton Solves
 }
 
 \author{
@@ -66,29 +86,40 @@
 \maketitle
 
 \begin{abstract}
-  We propose a multi-GPU mixed-precision inexact interior point method for
-  large-scale dense linear programming.  The normal-equations matrix is
-  partitioned into diagonal blocks, each factorized on a separate GPU in
-  low precision (FP32 or TF32) and used as a block-diagonal preconditioner
-  for conjugate gradient or iterative refinement.  The linear-solve
-  tolerance is adaptively scheduled as a function of the IPM duality
-  measure~$\mu_k$, from $10^{-4}$ in early iterations to $10^{-10}$ near
-  optimality, with a guaranteed FP64 fallback.  We prove polynomial
-  convergence of the predictor-corrector IPM when the relative residual
-  satisfies $\eta_k \le \bar{c}\mu_k^\alpha$, and analyze how inexactness
-  propagates through the primal and dual feasibility conditions.
-  Experiments on dense instances up to $m=200$, $n=600$ show that
-  fixed-accuracy low-precision and block-Jacobi solvers fail to converge,
-  while the adaptive solver matches the exact baseline in both iteration
-  count and solution quality.  The framework draws on the error-management
-  philosophy of quantum interior point methods, recasting it as a practical
-  strategy for heterogeneous GPU computing.
+  This manuscript reports a CPU reference study for GPU-oriented inexact
+  Newton solves inside primal-dual interior point methods for linear
+  programming.  The target linear system is the normal equation
+  $\bM_k \bDelta\by_k = \br_k$, with
+  $\bM_k = \bA\bD_k^2\bA^T$.  We distinguish complete blocked Cholesky,
+  which is a direct solver only when off-diagonal updates and Schur
+  complements are included, from diagonal-block Cholesky, which is only a
+  block-Jacobi preconditioner and must be paired with CG or refinement.
+  The CPU prototype compares FP64 dense Cholesky, blocked dense Cholesky,
+  simulated FP32 Cholesky, block-Jacobi PCG, and adaptive residual
+  refinement.  Experiments on small dense random instances up to
+  $m=200$, $n=600$ show that fixed-accuracy low-precision and
+  block-Jacobi solvers can fail as the normal equations become
+  ill-conditioned, while adaptive refinement can match the exact CPU
+  baseline's convergence on these tests.  These results are preliminary:
+  they do not demonstrate GPU speedup or HIPO integration, but they define
+  the frozen-Newton benchmarks needed to evaluate a future GPU backend
+  under the same residual tolerance.
 \end{abstract}
 
 % ===================================================================
 \section{Introduction}
 \label{sec:intro}
 % ===================================================================
+
+\paragraph{Scope and evidence boundary.}
+The present implementation is a CPU-only Python prototype.  It is designed
+to test linear-solver accuracy, stability, and failure modes before any
+HIPO integration.  References to GPU or multi-GPU execution in this draft
+therefore describe the intended backend and benchmark target, not a
+measured speedup.  A GPU acceleration claim would require an actual GPU
+benchmark, preferably on frozen Newton systems exported from HIPO, with
+the same residual tolerance and an explicit policy for matrix formation
+and host/device transfer timing.
 
 Linear programming (LP) is a fundamental technology in operations research,
 machine learning, quantitative finance, and engineering design.  Modern
@@ -189,30 +220,27 @@ iteration, \emph{how much} accuracy is required of the linear solve and
 \emph{in what precision} to compute the factorization, given the current
 duality measure $\mu_k$.
 
-We propose such a bridge in this paper: the \emph{multi-GPU mixed-precision
-inexact interior point method} for large-scale dense linear programming.
-The algorithm combines three ideas.  First, the normal-equations matrix
-$\bM_k$ is partitioned into $p$ diagonal blocks, each assigned to a
-distinct GPU and factorized independently via dense Cholesky in low
-precision (FP32 or TF32), yielding a block-diagonal preconditioner
-$\bP_k = \blkdiag(\bM_{11},\dots,\bM_{pp})$.  This block-partition strategy
-is implemented in \texttt{\_build\_block\_diagonal\_preconditioner} in
+We study this bridge in a CPU reference prototype for a future
+\emph{GPU-oriented mixed-precision inexact IPM Newton solver}.  The target
+backend combines three ideas.  First, the normal-equations matrix $\bM_k$
+may be partitioned into $p$ diagonal blocks and used to build a
+block-diagonal preconditioner
+$\bP_k = \blkdiag(\bM_{11},\dots,\bM_{pp})$.  This CPU prototype implements
+that strategy in \texttt{\_build\_block\_diagonal\_preconditioner} in
 \texttt{linear\_solver.py}, which slices $\bM_k$ into \texttt{num\_blocks}
-contiguous diagonal blocks and factors each block via Cholesky.  Second, the
-Newton step is computed by preconditioned conjugate gradient or mixed-precision
-iterative refinement, reusing the low-precision block factors to correct the
-solution---a \emph{factorize-once, solve-many} pattern that amortizes the
-$\cO(m^3)$ factorization cost across the predictor step, the corrector step,
-and all refinement corrections.  Third, and most critically, the target
-accuracy for the linear solve is adaptively scheduled as a piecewise function
-of $\mu_k$, implemented by \texttt{\_mu\_to\_eta\_target} in
+contiguous diagonal blocks and factors each block via Cholesky.  Second,
+the Newton step can be computed by preconditioned conjugate gradient or
+mixed-precision iterative refinement, reusing the block factors to correct
+the solution.  Third, and most critically, the target accuracy for the
+linear solve is adaptively scheduled as a piecewise function of $\mu_k$,
+implemented by \texttt{\_mu\_to\_eta\_target} in
 \texttt{linear\_solver.py}:
 $\eta_{\text{target}}(\mu) = 10^{-4}$ when $\mu > 10^{-2}$ (early IPM, loose
 accuracy), $\eta_{\text{target}}(\mu) = 10^{-7}$ when $10^{-6} < \mu \le
 10^{-2}$ (mid IPM), and $\eta_{\text{target}}(\mu) = 10^{-10}$ when $\mu \le
 10^{-6}$ (late IPM, near-exact solves).  A fallback to FP64 Cholesky
-guarantees convergence when the low-precision factorization cannot meet the
-target.
+provides a conservative CPU fallback when the low-precision factorization
+cannot meet the target.
 
 The approach is inspired, in part, by recent work on quantum interior point
 methods (QIPM)~\cite{Kerenidis2020}.  In QIPM, a quantum linear system
@@ -229,27 +257,19 @@ precision schedule in QIPM, and our analysis of feasibility drift
 (Section~\ref{sec:error-prop}) parallels the feasibility-preserving
 Newton reformulations studied in the QIPM literature.
 
-The paper makes the following contributions.  It presents a convergence
-analysis of the Mehrotra predictor-corrector IPM with inexact Newton
-directions governed by the condition $\eta_k \le \bar{c}\mu_k^\alpha$,
-showing that polynomial complexity $\cO(\sqrt{n}\log(1/\varepsilon))$ is
-retained (Section~\ref{sec:theory}, Theorem~\ref{th:conv}).  It develops
-a multi-GPU block-diagonal Cholesky preconditioner that trades off-diagonal
-coupling for embarrassingly parallel factorization across GPUs, analyzes its
-approximation quality through the generalized eigenvalue
-bound~\eqref{eq:cond-preconditioned}, and presents the
-\texttt{LowPrecisionCholeskySolver} and \texttt{BlockJacobiPCGSolver}
-algorithms (Section~\ref{sec:precond}, Algorithms~\ref{alg:lp-cholesky}
-and~\ref{alg:bj-pcg}).  It designs and implements a $\mu$-driven adaptive
-refinement solver that dynamically adjusts the linear-solve accuracy target
-across three phases, mathematically encoding this as the piecewise
-function~\eqref{eq:mu-schedule} and embedding it in an iterative refinement
-loop with a guaranteed FP64 fallback (Section~\ref{sec:adapt},
-Algorithm~\ref{alg:adapt}).  And it provides numerical experiments on dense
-LP instances up to $m=200$, $n=600$ that reveal a sharp empirical finding:
-fixed-accuracy low-precision and block-Jacobi solvers \emph{fail to converge
-on every problem size tested}, while the adaptive solver tracks the exact
-baseline in both iteration count and solution quality
+The current prototype makes the following limited contributions.  It
+summarizes the standard inexact-IPM residual condition
+$\eta_k \le \bar{c}\mu_k^\alpha$ and uses it as a design rule for
+linear-solve tolerance scheduling (Section~\ref{sec:theory}).  It
+implements CPU diagnostic solvers that separate complete blocked Cholesky
+with Schur-complement updates from diagonal-block Cholesky used only as a
+block-Jacobi preconditioner (Section~\ref{sec:precond}).  It implements a
+$\mu$-driven adaptive refinement solver with FP64 residual checks and FP64
+fallback (Section~\ref{sec:adapt}, Algorithm~\ref{alg:adapt}).  Finally,
+it reports CPU experiments on dense LP instances up to $m=200$, $n=600$
+showing that fixed-accuracy low-precision and block-Jacobi solvers can
+fail on these tests, while adaptive refinement tracks the exact CPU
+baseline in iteration count and solution quality
 (Section~\ref{sec:experiments}, Table~\ref{tab:full-results}).
 
 The remainder of the paper is organized as follows.  Section~\ref{sec:prelim}
@@ -844,17 +864,19 @@ detailed analyses).
   $\bx_k,\bs_k > 0$.
 \end{assumption}
 
-\begin{theorem}[Polynomial convergence of inexact IPM]
+\begin{theorem}[Informal residual condition for inexact IPM]
   \label{th:conv}
-  Let Assumptions~\ref{as:feas} and~\ref{as:rank} hold.  Suppose that at
-  each iteration $k$ of the Mehrotra predictor-corrector IPM, the linear
-  solve satisfies
+  Let Assumptions~\ref{as:feas} and~\ref{as:rank} hold, together with the
+  usual regularity assumptions in inexact primal-dual IPM analyses.  Suppose
+  that at each iteration $k$ of the Mehrotra predictor-corrector IPM, the
+  linear solve satisfies
   \begin{equation}
     \boxed{\eta_k \le \bar{c}\,\mu_k^\alpha},
     \label{eq:eta-condition}
   \end{equation}
   for constants $\bar{c} > 0$ and $\alpha \in (0,1]$ independent of $k$.
-  Then there exists a constant $\delta > 0$ such that
+  Then standard inexact-IPM analyses imply that, for sufficiently small
+  constants, there exists a constant $\delta > 0$ such that
   \begin{equation}
     \mu_{k+1} \le \Bigl(1 - \frac{\delta}{\sqrt{n}}\Bigr)\mu_k,
     \label{eq:mu-linear}
@@ -868,7 +890,9 @@ detailed analyses).
 \end{theorem}
 
 \begin{proof}[Proof sketch]
-  The proof adapts the standard analysis of polynomial IPM convergence
+  This is a summary of the standard proof strategy rather than a new
+  theorem established by the CPU prototype.  The proof adapts the standard
+  analysis of polynomial IPM convergence
   (see, e.g.,~\cite{Wright1997, Nesterov1994}) by tracking the effect of
   the inexactness residual through the predictor and corrector steps
   separately.
@@ -1472,6 +1496,7 @@ governed by the $\mu$-driven tolerance schedule.
 \begin{algorithm}[t]
   \caption{\texttt{AdaptiveRefinementSolver.solve(M, r, mu)}}
   \label{alg:adapt}
+  \scriptsize
   \KwIn{SPD matrix $\bM \in \R^{m \times m}$, right-hand side $\br \in \R^m$,
         duality measure $\mu \in \R_+ \cup \{\texttt{None}\}$}
   \KwOut{Solution $\widehat{\bDelta\by} \in \R^m$, relative residual $\eta$}
@@ -1556,6 +1581,7 @@ governed by the $\mu$-driven tolerance schedule.
   }
 
   \Return $(\widehat{\bDelta\by}, \eta)$\;
+  \vspace{-0.7\baselineskip}
 \end{algorithm}
 
 \subsection{Design analysis of the algorithm}
@@ -1955,9 +1981,10 @@ reference implementation.  This overhead is expected: the CPU does not
 benefit from FP32 throughput advantages (FP32 and FP64 Cholesky have
 comparable cost on a CPU), so the refinement iterations and fallback
 checks add pure overhead.  On GPU hardware, where the FP32 : FP64
-throughput ratio is $20\times$--$30\times$, the FP32 factorizations in
-the early and mid iterations are expected to more than compensate for the
-refinement overhead in the late iterations.
+throughput ratio can be much larger, the working hypothesis is that early
+and mid-iteration low-precision factorizations may compensate for late
+refinement overhead.  This remains to be measured on an actual GPU
+benchmark and is not established by the CPU data.
 
 \subsection{Condition number growth and its connection to theory}
 
@@ -2002,6 +2029,34 @@ when the problem demands it.
 Four figures accompany these results, generated by
 \texttt{experiments/benchmark\_solvers.py} and saved to
 \texttt{experiments/figures/}.
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.95\linewidth]{convergence_mu.pdf}
+  \caption{Duality-measure trajectories for the CPU IPM benchmark.}
+  \label{fig:conv}
+\end{figure}
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.95\linewidth]{condition_number.pdf}
+  \caption{Condition-number trajectories for the normal equations.}
+  \label{fig:cond}
+\end{figure}
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.95\linewidth]{eta_residual.pdf}
+  \caption{Linear-solve relative residuals measured in FP64.}
+  \label{fig:eta}
+\end{figure}
+
+\begin{figure}[p]
+  \centering
+  \includegraphics[width=0.85\linewidth]{total_time.pdf}
+  \caption{CPU wall-clock timings for the full IPM benchmark.}
+  \label{fig:time}
+\end{figure}
 
 Figure~\ref{fig:conv} shows the convergence trajectories: $\mu_k$ against
 the IPM iteration number on a semilog scale, with one $2 \times 2$ subplot
@@ -2067,20 +2122,15 @@ below $10^{-7}$ at termination.
 \label{sec:conclusion}
 % ===================================================================
 
-We have presented a multi-GPU mixed-precision inexact interior point
-framework for large-scale dense linear programming.  The method rests on
-three pillars: a block-diagonal Cholesky preconditioner factorized
-independently across multiple GPUs in low precision (FP32 or TF32),
-enabling embarrassing parallelism with zero inter-GPU communication
-during the factorization phase; an iterative refinement loop that reuses
-the stored low-precision factors to correct the Newton direction, in a
-factorize-once-solve-many pattern that amortizes the $\cO(m^3)$ cost
-across the predictor step, corrector step, and all refinement
-corrections; and a $\mu$-driven tolerance
-schedule~$\eta_{\text{target}}(\mu)$ that adaptively tightens the
-linear-solve accuracy requirement from $10^{-4}$ in early IPM iterations
-to $10^{-10}$ in the final steps, with a guaranteed fallback to FP64
-Cholesky when the low-precision factorization cannot meet the target.
+We have presented a CPU reference prototype and benchmark plan for a
+GPU-oriented mixed-precision inexact IPM Newton solver.  The prototype
+separates three ideas that should not be conflated: complete blocked
+Cholesky with Schur-complement updates is a direct solver; diagonal-block
+Cholesky is only a block-Jacobi preconditioner; and adaptive refinement is
+an accuracy-recovery mechanism driven by the IPM duality measure.  The
+current implementation performs residual checks in FP64 and falls back to
+FP64 Cholesky when the simulated low-precision solve cannot meet the
+target.
 
 A CPU reference implementation demonstrates the framework on dense LP
 instances up to $m=200$, $n=600$, comparing four solver backends within
@@ -2109,23 +2159,19 @@ must adapt to the tightening requirements of the central path.  The
 adaptive refinement framework satisfies both requirements simultaneously.
 
 Several directions for future work present themselves.  The most immediate
-is scaling to $m, n \approx 10^4$ with CUDA/CuPy GPU offload, where the
-FP32:FP64 throughput gap of $20\times$--$30\times$ should translate the
-CPU overhead observed here into a net speedup.  Multi-GPU distributed
-Cholesky with off-diagonal coupling communicated via MPI or NCCL would
-extend the block-diagonal preconditioner to a full distributed direct
-solver where the application warrants it.  Extending the framework to
-augmented KKT systems would mitigate the normal-equations conditioning
+is to export or intercept frozen Newton systems from HIPO and rerun the
+linear-solver benchmark under identical residual tolerances.  Only after
+that step should CUDA/CuPy or native CUDA kernels be used to test whether
+low-precision dense factorizations deliver a net speedup once matrix
+formation, transfer, and fallback costs are counted.  Multi-GPU
+distributed Cholesky with off-diagonal coupling communicated via MPI or
+NCCL would extend the block-diagonal preconditioner to a full distributed
+direct solver where the application warrants it.  Extending the framework
+to augmented KKT systems would mitigate the normal-equations conditioning
 issue analyzed in Section~\ref{sec:prelim}, at the cost of working with an
-indefinite system.  Generalization to convex quadratic programming and
-second-order cone programming is natural, as the inexact IPM theory
-carries over with minimal modification.  Finally, the structural analogy
-with quantum interior point methods~\cite{Kerenidis2020}---where QLSA
-error and GPU round-off error enter the same inexact Newton residual
-model---suggests that the adaptive scheduling philosophy developed here
-may inform the design of hybrid quantum-classical optimization algorithms,
-and that future advances in QIPM theory may translate directly into
-improved classical heuristics for heterogeneous computing.
+indefinite system.  Finally, the analogy with quantum interior point
+methods~\cite{Kerenidis2020} remains useful as an error-management lens,
+but the present evidence is classical and CPU-only.
 
 \bibliographystyle{plain}
 \bibliography{references}

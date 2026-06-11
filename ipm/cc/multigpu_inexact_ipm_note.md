@@ -4,6 +4,43 @@
 
 ---
 
+## 0. 当前原型审计状态（2026-06-10）
+
+当前仓库中的 Python 原型仍然是 **CPU-only reference implementation**。
+它已经可以支持小规模 dense random LP 上的 ExactCholesky 与
+AdaptiveRefinement 收敛性检查，也可以用
+`experiments/benchmark_newton_systems.py` 独立冻结 Newton normal equation：
+
+\[
+M_k = A D_k^2 A^T,\qquad M_k \Delta y = r
+\]
+
+并比较 dense Cholesky、完整 blocked dense Cholesky、CG、block-Jacobi PCG、
+FP32 simulated Cholesky/refinement、SuperLU sparse direct，以及可选的
+CHOLMOD/CuPy 后端。
+
+因此目前可以诚实声称的是：
+
+- CPU 原型验证了若干 linear solver failure modes；
+- diagonal-block Cholesky 只是 block-Jacobi preconditioner，必须配合
+  CG/refinement；
+- 完整 blocked Cholesky 必须包含 off-diagonal coupling 和 Schur-complement
+  / trailing updates，才是 direct solver；
+- AdaptiveRefinement 在小规模 CPU dense random LP 上能恢复接近 FP64
+  Cholesky baseline 的收敛。
+
+目前还不能声称：
+
+- GPU speedup；
+- multi-GPU scaling；
+- Netlib 或 HIPO production instance 上的加速；
+- GPU/block-wise dense Cholesky 已经可以替换 HIPO 的现有线性求解器。
+
+GPU speedup 只能由真实 GPU benchmark，或从 HIPO 导出的 frozen Newton
+systems 上的严格同容差 benchmark 支撑。
+
+---
+
 ## 1. 问题设定：从 LP 的 Newton system 出发
 
 考虑标准形式线性规划：

@@ -14,6 +14,8 @@ import pytest
 from inexact_ipm.linear_solver import (
     AdaptiveRefinementSolver,
     BlockJacobiPCGSolver,
+    BlockedCholeskySolver,
+    ConjugateGradientSolver,
     ExactCholeskySolver,
     LowPrecisionCholeskySolver,
     NewtonSolver,
@@ -94,6 +96,29 @@ class TestExactCholeskySolver:
 
 
 # ---------------------------------------------------------------------------
+# Tests: BlockedCholeskySolver
+# ---------------------------------------------------------------------------
+
+
+class TestBlockedCholeskySolver:
+    """Blocked Cholesky should behave like a direct solver."""
+
+    @pytest.mark.parametrize("block_size", [1, 3, 5, 32])
+    def test_recovers_true_solution(self, spd_system, block_size):
+        M, r, x_true, _ = spd_system
+        solver = BlockedCholeskySolver(block_size=block_size)
+        delta_y, eta = solver.solve(M, r)
+
+        assert _max_relative_error(delta_y, x_true) < 1e-10
+        assert eta < 1e-12
+        assert solver.solve_time > 0
+
+    def test_invalid_block_size_raises(self):
+        with pytest.raises(ValueError):
+            BlockedCholeskySolver(block_size=0)
+
+
+# ---------------------------------------------------------------------------
 # Tests: LowPrecisionCholeskySolver
 # ---------------------------------------------------------------------------
 
@@ -129,6 +154,31 @@ class TestLowPrecisionCholeskySolver:
             pass  # both are below noise floor — nothing to test
         else:
             assert eta_low >= eta_exact * 0.5  # shouldn't be *better* than exact
+
+
+# ---------------------------------------------------------------------------
+# Tests: ConjugateGradientSolver
+# ---------------------------------------------------------------------------
+
+
+class TestConjugateGradientSolver:
+    """Plain CG should converge on the small SPD fixture."""
+
+    def test_converges_below_tolerance(self, spd_system):
+        M, r, x_true, _ = spd_system
+        solver = ConjugateGradientSolver(cg_tol=1e-10, max_iter=200)
+        delta_y, eta = solver.solve(M, r)
+
+        assert solver.info == 0
+        assert eta < 1e-9
+        assert _max_relative_error(delta_y, x_true) < 1e-7
+        assert solver.num_iterations >= 1
+
+    def test_validation(self):
+        with pytest.raises(ValueError):
+            ConjugateGradientSolver(cg_tol=0.0)
+        with pytest.raises(ValueError):
+            ConjugateGradientSolver(max_iter=0)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +259,9 @@ class TestNewtonSolverAttributes:
 
     SOLVERS = [
         ExactCholeskySolver(),
+        BlockedCholeskySolver(block_size=4),
         LowPrecisionCholeskySolver(),
+        ConjugateGradientSolver(cg_tol=1e-8, max_iter=200),
         BlockJacobiPCGSolver(num_blocks=3, cg_tol=1e-8, max_iter=200),
     ]
 
@@ -249,7 +301,9 @@ class TestEdgeCases:
 
         for solver in [
             ExactCholeskySolver(),
+            BlockedCholeskySolver(block_size=3),
             LowPrecisionCholeskySolver(),
+            ConjugateGradientSolver(cg_tol=1e-10, max_iter=100),
             BlockJacobiPCGSolver(num_blocks=2, cg_tol=1e-10, max_iter=100),
         ]:
             delta_y, eta = solver.solve(M, r)
@@ -265,7 +319,9 @@ class TestEdgeCases:
 
         for solver in [
             ExactCholeskySolver(),
+            BlockedCholeskySolver(block_size=4),
             LowPrecisionCholeskySolver(),
+            ConjugateGradientSolver(cg_tol=1e-10, max_iter=100),
             BlockJacobiPCGSolver(num_blocks=5, cg_tol=1e-10, max_iter=100),
         ]:
             delta_y, eta = solver.solve(M, r)
@@ -461,7 +517,9 @@ class TestAllSolversWellConditioned:
 
     SOLVERS = [
         ExactCholeskySolver(),
+        BlockedCholeskySolver(block_size=8),
         LowPrecisionCholeskySolver(),
+        ConjugateGradientSolver(cg_tol=1e-6, max_iter=200),
         BlockJacobiPCGSolver(num_blocks=4, cg_tol=1e-6, max_iter=200),
         AdaptiveRefinementSolver(
             base_precision="float32", max_refinement_steps=5

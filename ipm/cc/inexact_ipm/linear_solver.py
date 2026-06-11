@@ -3,13 +3,17 @@ Pluggable linear system solvers for the IPM Newton step.
 
 The Newton system at each IPM iteration reduces to the normal equations
 
-    M @ delta_y = r,   M = A @ D^{-1} @ A^T  (SPD),
+    M @ delta_y = r,   M = A @ diag(d^2) @ A.T  (SPD),
 
-where D = X^{-1} S and r is the assembled right-hand side.  This module
+where d = sqrt(x / s) in the current prototype and r is the assembled
+right-hand side.  This module
 provides three solver strategies with a uniform ``solve(M, r)`` interface:
 
 * ``ExactCholeskySolver``       — FP64 dense Cholesky (exact baseline).
+* ``BlockedCholeskySolver``     — FP64 blocked dense Cholesky with
+                                   Schur-complement/trailing updates.
 * ``LowPrecisionCholeskySolver`` — FP32 downcast Cholesky (simulates GPU low-precision).
+* ``ConjugateGradientSolver``    — unpreconditioned CG baseline.
 * ``BlockJacobiPCGSolver``       — Conjugate gradient with a block-diagonal
                                    Jacobi preconditioner (inexact iterative).
 * ``AdaptiveRefinementSolver``  — Dynamic-precision iterative refinement
@@ -143,6 +147,60 @@ class ExactCholeskySolver(NewtonSolver):
 
 
 # ===================================================================
+# Blocked FP64 Cholesky solver with trailing Schur updates
+# ===================================================================
+
+
+class BlockedCholeskySolver(NewtonSolver):
+    """Dense blocked Cholesky solve in FP64.
+
+    This is a direct solver, not a block-Jacobi approximation.  Each
+    diagonal panel is factored, the off-diagonal panel is solved, and the
+    trailing matrix is updated by the Schur-complement term
+    ``A22 -= L21 @ L21.T``.  It is included as an algorithmic reference for
+    "complete block Cholesky with off-diagonal updates"; SciPy/LAPACK's
+    native Cholesky remains the performance baseline.
+    """
+
+    def __init__(self, block_size: int = 64, regularize: float = 0.0) -> None:
+        super().__init__()
+        if block_size < 1:
+            raise ValueError("block_size must be >= 1")
+        if regularize < 0:
+            raise ValueError("regularize must be non-negative")
+        self.block_size = block_size
+        self.regularize = regularize
+
+    def solve(
+        self,
+        M: np.ndarray,
+        r: np.ndarray,
+        mu: float | None = None,
+    ) -> tuple[np.ndarray, float]:
+        _ = mu
+        t0 = time.perf_counter()
+
+        L = _blocked_cholesky_factor(
+            M,
+            block_size=self.block_size,
+            regularize=self.regularize,
+        )
+        y = linalg.solve_triangular(L, r, lower=True, check_finite=False)
+        delta_y = linalg.solve_triangular(
+            L.T,
+            y,
+            lower=False,
+            check_finite=False,
+        )
+
+        self.solve_time = time.perf_counter() - t0
+        self.num_iterations = max(1, int(np.ceil(M.shape[0] / self.block_size)))
+        self.final_eta = self._compute_eta(M, delta_y, r)
+
+        return delta_y, self.final_eta
+
+
+# ===================================================================
 # Low-precision (FP32) Cholesky solver
 # ===================================================================
 
@@ -203,6 +261,54 @@ class LowPrecisionCholeskySolver(NewtonSolver):
 
         self.solve_time = time.perf_counter() - t0
         self.num_iterations = 1
+        self.final_eta = self._compute_eta(M, delta_y, r)
+
+        return delta_y, self.final_eta
+
+
+# ===================================================================
+# Unpreconditioned Conjugate Gradient
+# ===================================================================
+
+
+class ConjugateGradientSolver(NewtonSolver):
+    """Unpreconditioned Conjugate Gradient baseline for SPD systems."""
+
+    def __init__(self, cg_tol: float = 1e-8, max_iter: int = 1000) -> None:
+        super().__init__()
+        if cg_tol <= 0:
+            raise ValueError("cg_tol must be positive")
+        if max_iter < 1:
+            raise ValueError("max_iter must be >= 1")
+        self.cg_tol = cg_tol
+        self.max_iter = max_iter
+        self.info: int = 0
+
+    def solve(
+        self,
+        M: np.ndarray,
+        r: np.ndarray,
+        mu: float | None = None,
+    ) -> tuple[np.ndarray, float]:
+        _ = mu
+        t0 = time.perf_counter()
+
+        cg_iters: list[int] = [0]
+
+        def _cb(_xk: np.ndarray) -> None:
+            cg_iters[0] += 1
+
+        delta_y, info = splinalg.cg(
+            M,
+            r,
+            rtol=self.cg_tol,
+            maxiter=self.max_iter,
+            callback=_cb,
+        )
+
+        self.solve_time = time.perf_counter() - t0
+        self.info = int(info)
+        self.num_iterations = cg_iters[0] if info == 0 else int(info)
         self.final_eta = self._compute_eta(M, delta_y, r)
 
         return delta_y, self.final_eta
@@ -503,6 +609,62 @@ def _safe_cast_f32(arr: np.ndarray) -> np.ndarray:
     # FP32 max is ~3.4e38; leave headroom.
     clip = np.float32(1e37)
     return np.clip(arr, -clip, clip).astype(np.float32)
+
+
+# ===================================================================
+# Helper: blocked dense Cholesky
+# ===================================================================
+
+
+def _blocked_cholesky_factor(
+    M: np.ndarray,
+    block_size: int,
+    regularize: float = 0.0,
+) -> np.ndarray:
+    """Return a lower Cholesky factor using explicit block updates.
+
+    The returned ``L`` satisfies ``L @ L.T ~= M + regularize * I``.  This
+    routine is intentionally simple and diagnostic; it exposes the Schur
+    complement updates that a distributed/GPU block Cholesky must perform.
+    """
+    if M.ndim != 2 or M.shape[0] != M.shape[1]:
+        raise ValueError("M must be a square matrix")
+
+    n = M.shape[0]
+    A_work = np.array(M, dtype=np.float64, copy=True)
+    if regularize > 0:
+        A_work.flat[:: n + 1] += regularize
+
+    L = np.zeros_like(A_work)
+
+    for k in range(0, n, block_size):
+        end = min(k + block_size, n)
+
+        panel = A_work[k:end, k:end]
+        panel = 0.5 * (panel + panel.T)
+        Lkk = linalg.cholesky(panel, lower=True, check_finite=False)
+        L[k:end, k:end] = Lkk
+
+        if end == n:
+            continue
+
+        # M21 = L21 Lkk.T, so solve Lkk L21.T = M21.T.
+        L21_T = linalg.solve_triangular(
+            Lkk,
+            A_work[end:n, k:end].T,
+            lower=True,
+            check_finite=False,
+        )
+        L21 = L21_T.T
+        L[end:n, k:end] = L21
+
+        # Schur-complement/trailing update.
+        A_work[end:n, end:n] -= L21 @ L21.T
+        A_work[end:n, end:n] = 0.5 * (
+            A_work[end:n, end:n] + A_work[end:n, end:n].T
+        )
+
+    return L
 
 
 # ===================================================================
